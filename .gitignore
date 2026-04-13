@@ -1,0 +1,5 @@
+.envrc
+.env
+.gocache/
+.gomodcache/
+.DS_Store

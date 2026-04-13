@@ -1,0 +1,16 @@
+.git
+.gitignore
+.cursor
+terminals
+agent-transcripts
+
+.env
+.envrc
+
+bin
+dist
+tmp
+coverage*
+
+postgres_data
+*.log

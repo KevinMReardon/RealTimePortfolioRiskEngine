@@ -1,0 +1,18 @@
+# Copy to .envrc (or merge) and run: direnv allow
+# Do not put real secrets in committed files.
+
+export DATABASE_URL='postgres://postgres:postgres@localhost:5432/portfolio?sslmode=disable'
+export ORDERING_WATERMARK_MS=2000
+
+# Optional per-IP HTTP rate limits (token bucket). Ingest defaults: RPS 20, burst 40.
+# export HTTP_RATE_LIMIT_INGEST_ENABLED=true
+# export HTTP_RATE_LIMIT_INGEST_RPS=20
+# export HTTP_RATE_LIMIT_INGEST_BURST=40
+# export HTTP_RATE_LIMIT_GET_ENABLED=true
+# export HTTP_RATE_LIMIT_GET_RPS=60
+# export HTTP_RATE_LIMIT_GET_BURST=120
+
+# export OPENAI_API_KEY=''  # AI layer; set locally only
+#
+# Docker Compose does not load .envrc — for `docker compose up`, copy OpenAI vars into a
+# project-root `.env` file (see `.env.example`) or they will stay unset in the container.
