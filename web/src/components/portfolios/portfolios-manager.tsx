@@ -5,7 +5,7 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 
-import { useSavedPortfolios } from "@/hooks/use-saved-portfolios";
+import { useCreatePortfolioMutation, usePortfoliosQuery } from "@/hooks/use-portfolio-api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -20,20 +20,24 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { ErrorAlert } from "@/components/feedback/query-states";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const schema = z.object({
-  id: z.string().uuid("Must be a UUID"),
-  label: z.string().min(1, "Label is required"),
+  name: z.string().min(1, "Name is required"),
+  base_currency: z.string().min(3, "Use a 3-letter code").max(3, "Use a 3-letter code"),
 });
 
 type FormValues = z.infer<typeof schema>;
 
 export function PortfoliosManager() {
-  const { items, upsert, remove } = useSavedPortfolios();
+  const portfoliosQ = usePortfoliosQuery();
+  const createM = useCreatePortfolioMutation();
+  const items = portfoliosQ.data ?? [];
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { id: "", label: "Primary book" },
+    defaultValues: { name: "Primary book", base_currency: "USD" },
   });
 
   return (
@@ -41,7 +45,7 @@ export function PortfoliosManager() {
       <div className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Portfolios</h1>
         <p className="text-sm text-muted-foreground">
-          v1 reads portfolios by UUID (`GET /v1/portfolios/:id`). Save IDs you care about — no directory API yet.
+          Create and browse portfolio records from the backend catalog (`GET/POST /v1/portfolios`).
         </p>
       </div>
 
@@ -49,36 +53,54 @@ export function PortfoliosManager() {
         <Card className="lg:col-span-1">
           <CardHeader>
             <CardTitle>Add portfolio</CardTitle>
-            <CardDescription>Stored locally in your browser.</CardDescription>
+            <CardDescription>A UUID is generated server-side on create.</CardDescription>
           </CardHeader>
           <CardContent>
             <form
               className="space-y-3"
-              onSubmit={form.handleSubmit((v) => {
-                upsert({ id: v.id, label: v.label });
-                form.reset({ id: "", label: v.label });
+              onSubmit={form.handleSubmit(async (v) => {
+                createM.reset();
+                const created = await createM.mutateAsync({
+                  name: v.name.trim(),
+                  base_currency: v.base_currency.toUpperCase(),
+                });
+                form.reset({ name: created.name, base_currency: created.base_currency });
               })}
             >
               <div className="space-y-2">
-                <Label htmlFor="label">Label</Label>
-                <Input id="label" {...form.register("label")} />
-                {form.formState.errors.label?.message ? (
+                <Label htmlFor="name">Name</Label>
+                <Input id="name" {...form.register("name")} />
+                {form.formState.errors.name?.message ? (
                   <p className="text-xs text-destructive">
-                    {form.formState.errors.label.message}
+                    {form.formState.errors.name.message}
                   </p>
                 ) : null}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="id">Portfolio UUID</Label>
-                <Input id="id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" {...form.register("id")} />
-                {form.formState.errors.id?.message ? (
+                <Label htmlFor="base_currency">Base currency</Label>
+                <Select
+                  value={form.watch("base_currency")}
+                  onValueChange={(v) => form.setValue("base_currency", v)}
+                >
+                  <SelectTrigger id="base_currency">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="USD">USD</SelectItem>
+                    <SelectItem value="EUR">EUR</SelectItem>
+                    <SelectItem value="GBP">GBP</SelectItem>
+                    <SelectItem value="JPY">JPY</SelectItem>
+                  </SelectContent>
+                </Select>
+                {form.formState.errors.base_currency?.message ? (
                   <p className="text-xs text-destructive">
-                    {form.formState.errors.id.message}
+                    {form.formState.errors.base_currency.message}
                   </p>
                 ) : null}
               </div>
-              <Button className="w-full" type="submit">
-                Save
+              {createM.error ? <ErrorAlert error={createM.error} /> : null}
+              <Button className="w-full" type="submit" disabled={createM.isPending}>
+                {createM.isPending ? "Creating…" : "Create portfolio"}
               </Button>
             </form>
           </CardContent>
@@ -87,38 +109,33 @@ export function PortfoliosManager() {
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
             <div className="space-y-1">
-              <CardTitle>Saved</CardTitle>
-              <CardDescription>Quick access + deep links.</CardDescription>
+              <CardTitle>Catalog</CardTitle>
+              <CardDescription>Backend-managed portfolio directory.</CardDescription>
             </div>
             <Badge variant="outline">{items.length} total</Badge>
           </CardHeader>
           <CardContent>
+            {portfoliosQ.error ? <ErrorAlert error={portfoliosQ.error} /> : null}
             {items.length ? (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Label</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Currency</TableHead>
                     <TableHead>ID</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {items.map((p) => (
-                    <TableRow key={p.id}>
-                      <TableCell className="font-medium">{p.label}</TableCell>
-                      <TableCell className="font-mono text-xs">{p.id}</TableCell>
+                    <TableRow key={p.portfolio_id}>
+                      <TableCell className="font-medium">{p.name}</TableCell>
+                      <TableCell>{p.base_currency}</TableCell>
+                      <TableCell className="font-mono text-xs">{p.portfolio_id}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
                           <Button asChild size="sm" variant="secondary">
-                            <Link href={`/portfolios/${p.id}`}>Open</Link>
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            type="button"
-                            onClick={() => remove(p.id)}
-                          >
-                            Remove
+                            <Link href={`/portfolios/${p.portfolio_id}`}>Open</Link>
                           </Button>
                         </div>
                       </TableCell>
@@ -130,7 +147,7 @@ export function PortfoliosManager() {
               <Alert>
                 <AlertTitle>Nothing saved yet</AlertTitle>
                 <AlertDescription>
-                  Paste a portfolio UUID from your environment to anchor the console. Reserved price-stream UUIDs are rejected by the API — use real portfolio IDs.
+                  Create your first portfolio to start ingesting trades and viewing risk metrics.
                 </AlertDescription>
               </Alert>
             )}

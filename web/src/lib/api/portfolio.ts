@@ -1,6 +1,8 @@
 import { apiFetch } from "@/lib/api/client";
 import type {
+  CreatePortfolioRequest,
   InsightsExplainResponse,
+  ListPortfoliosResponse,
   PortfolioView,
   PostPriceRequest,
   PostTradeRequest,
@@ -9,6 +11,17 @@ import type {
   ScenarioRunRequest,
   IngestResponse,
 } from "@/lib/api/types";
+
+export function listPortfolios() {
+  return apiFetch<ListPortfoliosResponse>(`/v1/portfolios`);
+}
+
+export function createPortfolio(body: CreatePortfolioRequest) {
+  return apiFetch<ListPortfoliosResponse["portfolios"][number]>(`/v1/portfolios`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
 
 export function getPortfolio(portfolioId: string) {
   return apiFetch<PortfolioView>(`/v1/portfolios/${encodeURIComponent(portfolioId)}`);

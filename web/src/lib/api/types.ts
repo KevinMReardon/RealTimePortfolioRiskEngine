@@ -42,6 +42,23 @@ export type PortfolioView = {
   as_of_processing_time?: string;
 };
 
+export type PortfolioCatalogEntry = {
+  portfolio_id: string;
+  name: string;
+  base_currency: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ListPortfoliosResponse = {
+  portfolios: PortfolioCatalogEntry[];
+};
+
+export type CreatePortfolioRequest = {
+  name: string;
+  base_currency?: string;
+};
+
 export type RiskAssumptions = Record<string, unknown>;
 
 export type RiskExposure = {

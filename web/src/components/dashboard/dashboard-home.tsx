@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { useSavedPortfolios } from "@/hooks/use-saved-portfolios";
-import { usePortfolioQuery, useRiskQuery } from "@/hooks/use-portfolio-api";
+import { usePortfolioQuery, usePortfoliosQuery, useRiskQuery } from "@/hooks/use-portfolio-api";
 import { compactNumber, compactUsdLike } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,16 +24,17 @@ import { PositionsTable } from "@/components/tables/positions-table";
 export function DashboardHome() {
   const router = useRouter();
   const params = useSearchParams();
-  const { items: saved } = useSavedPortfolios();
+  const portfoliosQ = usePortfoliosQuery();
+  const saved = useMemo(() => portfoliosQ.data ?? [], [portfoliosQ.data]);
 
-  const selected = params.get("portfolio") ?? saved[0]?.id ?? null;
+  const selected = params.get("portfolio") ?? saved[0]?.portfolio_id ?? null;
 
   const portfolioQ = usePortfolioQuery(selected);
   const riskQ = useRiskQuery(selected);
 
   const headline = useMemo(() => {
     if (!selected) return "Pick a portfolio to begin";
-    return saved.find((p) => p.id === selected)?.label ?? "Portfolio";
+    return saved.find((p) => p.portfolio_id === selected)?.name ?? "Portfolio";
   }, [saved, selected]);
 
   return (
@@ -55,17 +55,17 @@ export function DashboardHome() {
               url.searchParams.set("portfolio", v);
               router.push(`${url.pathname}?${url.searchParams.toString()}`);
             }}
-            disabled={!saved.length}
+            disabled={!saved.length || portfoliosQ.isLoading}
           >
             <SelectTrigger className="w-[min(92vw,380px)]">
-              <SelectValue placeholder={saved.length ? "Select…" : "Add a portfolio first"} />
+              <SelectValue placeholder={saved.length ? "Select…" : "Create a portfolio first"} />
             </SelectTrigger>
             <SelectContent>
               {saved.map((p) => (
-                <SelectItem key={p.id} value={p.id}>
-                  <span className="font-medium">{p.label}</span>
+                <SelectItem key={p.portfolio_id} value={p.portfolio_id}>
+                  <span className="font-medium">{p.name}</span>
                   <span className="ml-2 font-mono text-xs text-muted-foreground">
-                    {p.id.slice(0, 8)}…
+                    {p.portfolio_id.slice(0, 8)}…
                   </span>
                 </SelectItem>
               ))}
@@ -82,15 +82,15 @@ export function DashboardHome() {
           <CardHeader>
             <CardTitle>No portfolio selected</CardTitle>
             <CardDescription>
-              The Go API addresses portfolios by UUID. Save one or more IDs locally to drive the UI.
+              Create a portfolio to start ingesting trades and running risk workflows.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-muted-foreground">
-              This keeps the console usable even though v1 doesn’t expose a portfolio directory endpoint.
+              This workspace now reads directly from `GET /v1/portfolios` instead of browser-local state.
             </div>
             <Button asChild>
-              <Link href="/portfolios">Add a portfolio UUID</Link>
+              <Link href="/portfolios">Create portfolio</Link>
             </Button>
           </CardContent>
         </Card>

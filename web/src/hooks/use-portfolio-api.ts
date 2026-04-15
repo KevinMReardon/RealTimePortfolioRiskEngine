@@ -7,9 +7,11 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import {
+  createPortfolio,
   explainInsights,
   getPortfolio,
   getRisk,
+  listPortfolios,
   postPrice,
   postTrade,
   runScenario,
@@ -17,6 +19,7 @@ import {
 import type {
   InsightsExplainResponse,
   IngestResponse,
+  PortfolioCatalogEntry,
   PortfolioView,
   PostPriceRequest,
   PostTradeRequest,
@@ -26,9 +29,17 @@ import type {
 } from "@/lib/api/types";
 
 export const qk = {
+  portfolios: () => ["portfolios"] as const,
   portfolio: (id: string) => ["portfolio", id] as const,
   risk: (id: string) => ["risk", id] as const,
 };
+
+export function usePortfoliosQuery() {
+  return useQuery({
+    queryKey: qk.portfolios(),
+    queryFn: async () => (await listPortfolios()).portfolios,
+  });
+}
 
 export function usePortfolioQuery(
   portfolioId: string | null,
@@ -80,6 +91,17 @@ export function usePostTradeMutation() {
     onSuccess: async (_data, vars) => {
       await qc.invalidateQueries({ queryKey: qk.portfolio(vars.portfolio_id) });
       await qc.invalidateQueries({ queryKey: qk.risk(vars.portfolio_id) });
+    },
+  });
+}
+
+export function useCreatePortfolioMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createPortfolio,
+    onSuccess: async (row: PortfolioCatalogEntry) => {
+      await qc.invalidateQueries({ queryKey: qk.portfolios() });
+      await qc.invalidateQueries({ queryKey: qk.portfolio(row.portfolio_id) });
     },
   });
 }

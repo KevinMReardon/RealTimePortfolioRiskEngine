@@ -20,6 +20,8 @@ type RouterConfig struct {
 	Logger        *zap.Logger
 	Ingest        ingestion.Service
 	ReadPortfolio PortfolioReadStore
+	// PortfolioCatalog enables GET/POST /v1/portfolios directory operations.
+	PortfolioCatalog PortfolioCatalogStore
 	// RiskRead loads sigma/return stats; nil skips GET /v1/portfolios/:id/risk.
 	RiskRead RiskReadStore
 	// RiskSigmaWindowN is passed to return-window queries (e.g. 60).
@@ -61,6 +63,10 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	if cfg.ReadPortfolio != nil && len(cfg.PriceStreamPartitions) > 0 {
 		read := router.Group("/v1")
 		read.Use(PerIPRateLimitMiddleware(cfg.RateLimitGet))
+		if cfg.PortfolioCatalog != nil {
+			read.GET("/portfolios", listPortfoliosHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
+			read.POST("/portfolios", createPortfolioHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
+		}
 		read.GET("/portfolios/:id", getPortfolioHandler(cfg.ReadPortfolio, logger, cfg.PriceStreamPartitions))
 		if cfg.RiskRead != nil {
 			read.GET("/portfolios/:id/risk", getRiskHandler(cfg.RiskRead, logger, cfg.PriceStreamPartitions, cfg.RiskSigmaWindowN))

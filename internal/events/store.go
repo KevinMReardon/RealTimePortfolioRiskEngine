@@ -38,6 +38,15 @@ type LatestPortfolioSnapshot struct {
 	Aggregate *portfolio.Aggregate
 }
 
+// PortfolioCatalogEntry is a user-facing portfolio directory row.
+type PortfolioCatalogEntry struct {
+	PortfolioID  uuid.UUID
+	Name         string
+	BaseCurrency string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 // Writer contains mutating event/projection operations.
 type Writer interface {
 	Append(ctx context.Context, event domain.EventEnvelope) (AppendResult, error)
@@ -78,6 +87,10 @@ type Reader interface {
 	LoadLatestPortfolioSnapshot(ctx context.Context, portfolioID uuid.UUID) (LatestPortfolioSnapshot, error)
 	// UpsertRiskSnapshot persists optional materialized risk output.
 	UpsertRiskSnapshot(ctx context.Context, portfolioID uuid.UUID, asOfEventTime time.Time, asOfEventID uuid.UUID, snapshot json.RawMessage) error
+	// ListPortfolios returns user-facing portfolio catalog rows sorted by recency.
+	ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error)
+	// CreatePortfolio inserts one portfolio catalog row.
+	CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error)
 }
 
 // Repository combines all read/write behavior for current concrete store.

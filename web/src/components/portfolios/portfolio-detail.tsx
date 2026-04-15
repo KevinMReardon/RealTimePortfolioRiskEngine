@@ -12,7 +12,6 @@ import {
   useRiskQuery,
   useRunScenarioMutation,
 } from "@/hooks/use-portfolio-api";
-import { useSavedPortfolios } from "@/hooks/use-saved-portfolios";
 import { compactNumber, compactUsdLike } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,13 +59,6 @@ export function PortfolioDetail({ portfolioId }: { portfolioId: string }) {
   const riskQ = useRiskQuery(portfolioId);
   const scenarioM = useRunScenarioMutation(portfolioId);
   const insightsM = useExplainInsightsMutation(portfolioId);
-  const { upsert } = useSavedPortfolios();
-
-  React.useEffect(() => {
-    if (portfolioQ.data?.portfolio_id) {
-      upsert({ id: portfolioQ.data.portfolio_id, label: "Portfolio" });
-    }
-  }, [portfolioQ.data?.portfolio_id, upsert]);
 
   const scenarioForm = useForm<ScenarioForm>({
     resolver: zodResolver(scenarioSchema),

@@ -29,6 +29,53 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
+// ListPortfolios returns catalog rows ordered by newest create first.
+func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT portfolio_id, name, base_currency, created_at, updated_at
+		FROM portfolios
+		ORDER BY created_at DESC, portfolio_id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list portfolios catalog: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]PortfolioCatalogEntry, 0)
+	for rows.Next() {
+		var e PortfolioCatalogEntry
+		if err := rows.Scan(&e.PortfolioID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan portfolio catalog row: %w", err)
+		}
+		e.CreatedAt = e.CreatedAt.UTC()
+		e.UpdatedAt = e.UpdatedAt.UTC()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// CreatePortfolio inserts one catalog row and returns the stored values.
+func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
+	var out PortfolioCatalogEntry
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO portfolios (portfolio_id, name, base_currency, created_at, updated_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		RETURNING portfolio_id, name, base_currency, created_at, updated_at
+	`, portfolioID, name, baseCurrency).Scan(
+		&out.PortfolioID,
+		&out.Name,
+		&out.BaseCurrency,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if err != nil {
+		return PortfolioCatalogEntry{}, fmt.Errorf("create portfolio catalog row: %w", err)
+	}
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	return out, nil
+}
+
 // Append inserts a canonical event in one transaction. On idempotency conflict, returns the stored event_id.
 func (s *PostgresStore) Append(ctx context.Context, event domain.EventEnvelope) (AppendResult, error) {
 	portfolioUUID, err := uuid.Parse(event.PortfolioID)
@@ -218,8 +265,14 @@ func (s *PostgresStore) LoadProjectionCursor(ctx context.Context, portfolioID uu
 // the pure assembler input for GET /v1/portfolios/{id}. found=false means unknown portfolio id.
 func (s *PostgresStore) LoadPortfolioAssemblerInput(ctx context.Context, portfolioID uuid.UUID) (portfolio.PortfolioAssemblerInput, bool, error) {
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE portfolio_id = $1)`, portfolioID).Scan(&exists); err != nil {
-		return portfolio.PortfolioAssemblerInput{}, false, fmt.Errorf("check portfolio exists: %w", err)
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolios WHERE portfolio_id = $1
+		) OR EXISTS(
+			SELECT 1 FROM events WHERE portfolio_id = $1
+		)
+	`, portfolioID).Scan(&exists); err != nil {
+		return portfolio.PortfolioAssemblerInput{}, false, fmt.Errorf("check portfolio exists in catalog/events: %w", err)
 	}
 	if !exists {
 		return portfolio.PortfolioAssemblerInput{}, false, nil

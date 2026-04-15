@@ -94,6 +94,7 @@ func run() error {
 		Logger:                logger,
 		Ingest:                ingestSvc,
 		ReadPortfolio:         repo,
+		PortfolioCatalog:      repo,
 		RiskRead:              repo,
 		RiskSigmaWindowN:      cfg.RiskSigmaWindowN,
 		PriceStreamPartitions: cfg.PriceStreamPartitions,
