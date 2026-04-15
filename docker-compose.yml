@@ -57,5 +57,19 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: portfolio-web
+    environment:
+      # Server-side proxy target for src/app/api/backend (same-origin from browser)
+      BACKEND_URL: http://app:8080
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
+
 volumes:
   postgres_data:

@@ -1,0 +1,8 @@
+node_modules
+.next
+.turbo
+out
+npm-debug.log*
+.env
+.env.local
+.env.*.local

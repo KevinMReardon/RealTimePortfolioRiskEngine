@@ -3,3 +3,10 @@
 .gocache/
 .gomodcache/
 .DS_Store
+
+# Next.js (web/)
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+web/.env.local
