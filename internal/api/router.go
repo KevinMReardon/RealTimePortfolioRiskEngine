@@ -49,6 +49,8 @@ type RouterConfig struct {
 	PriceFeedPollInterval time.Duration
 	// PriceFeedWatchlistManager exposes in-process watchlist read/write controls.
 	PriceFeedWatchlistManager PriceFeedWatchlistManager
+	// PriceFeedWatchlistStore persists watchlist changes across restarts.
+	PriceFeedWatchlistStore PriceFeedWatchlistPersistence
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -101,7 +103,10 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 				cfg.PriceFeedWatchlistManager,
 			))
 			read.GET("/price-feed/watchlist", getPriceFeedWatchlistHandler(cfg.PriceFeedWatchlistManager))
-			read.PUT("/price-feed/watchlist", putPriceFeedWatchlistHandler(cfg.PriceFeedWatchlistManager))
+			read.PUT("/price-feed/watchlist", putPriceFeedWatchlistHandlerWithPersistence(
+				cfg.PriceFeedWatchlistManager,
+				cfg.PriceFeedWatchlistStore,
+			))
 		}
 	}
 

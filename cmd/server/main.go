@@ -67,6 +67,17 @@ func run() error {
 	var priceFeedRuntime *pricefeed.RuntimeTracker
 	var priceFeedRunner *pricefeed.PriceIngestor
 	if cfg.PriceFeedEnabled {
+		initialWatchlist := cfg.PriceFeedSymbols
+		if persistedWatchlist, found, err := repo.LoadPriceFeedWatchlist(context.Background()); err != nil {
+			return err
+		} else if found {
+			initialWatchlist = persistedWatchlist
+			logger.Info("price_feed_watchlist_loaded",
+				zap.Int("symbols", len(initialWatchlist)),
+				zap.String("source", "database"),
+			)
+		}
+		cfg.PriceFeedSymbols = initialWatchlist
 		feedRunner, rt, err := pricefeed.NewFromConfig(ingestSvc, cfg, logger)
 		if err != nil {
 			return err
@@ -139,6 +150,7 @@ func run() error {
 		PriceFeedProvider:         cfg.PriceFeedProvider,
 		PriceFeedPollInterval:     cfg.PriceFeedPollInterval,
 		PriceFeedWatchlistManager: priceFeedRunner,
+		PriceFeedWatchlistStore:   repo,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

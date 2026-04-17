@@ -27,6 +27,10 @@ type PriceFeedWatchlistManager interface {
 	SetWatchlist(symbols []string)
 }
 
+type PriceFeedWatchlistPersistence interface {
+	UpsertPriceFeedWatchlist(ctx context.Context, watchlist []string) error
+}
+
 type priceListItemJSON struct {
 	Symbol             string  `json:"symbol"`
 	Price              string  `json:"price"`
@@ -277,6 +281,13 @@ func getPriceFeedWatchlistHandler(watchlistMgr PriceFeedWatchlistManager) gin.Ha
 }
 
 func putPriceFeedWatchlistHandler(watchlistMgr PriceFeedWatchlistManager) gin.HandlerFunc {
+	return putPriceFeedWatchlistHandlerWithPersistence(watchlistMgr, nil)
+}
+
+func putPriceFeedWatchlistHandlerWithPersistence(
+	watchlistMgr PriceFeedWatchlistManager,
+	persist PriceFeedWatchlistPersistence,
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if watchlistMgr == nil {
 			respondAPIError(c, http.StatusServiceUnavailable, ErrCodeInsufficientData, "price feed watchlist is unavailable", nil)
@@ -288,8 +299,15 @@ func putPriceFeedWatchlistHandler(watchlistMgr PriceFeedWatchlistManager) gin.Ha
 			return
 		}
 		watchlistMgr.SetWatchlist(req.Watchlist)
+		watchlist := watchlistMgr.Watchlist()
+		if persist != nil {
+			if err := persist.UpsertPriceFeedWatchlist(c.Request.Context(), watchlist); err != nil {
+				respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to persist watchlist", nil)
+				return
+			}
+		}
 		c.JSON(http.StatusOK, priceFeedWatchlistResponse{
-			Watchlist: watchlistMgr.Watchlist(),
+			Watchlist: watchlist,
 		})
 	}
 }

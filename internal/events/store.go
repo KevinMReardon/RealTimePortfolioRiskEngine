@@ -91,6 +91,11 @@ type Reader interface {
 	ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error)
 	// CreatePortfolio inserts one portfolio catalog row.
 	CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error)
+	// LoadPriceFeedWatchlist returns the persisted automated feed watchlist.
+	// found=false indicates no persisted value is present.
+	LoadPriceFeedWatchlist(ctx context.Context) (watchlist []string, found bool, err error)
+	// UpsertPriceFeedWatchlist persists the automated feed watchlist.
+	UpsertPriceFeedWatchlist(ctx context.Context, watchlist []string) error
 }
 
 // Repository combines all read/write behavior for current concrete store.

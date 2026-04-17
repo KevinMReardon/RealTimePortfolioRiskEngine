@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,6 +75,61 @@ func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UU
 	out.CreatedAt = out.CreatedAt.UTC()
 	out.UpdatedAt = out.UpdatedAt.UTC()
 	return out, nil
+}
+
+func (s *PostgresStore) LoadPriceFeedWatchlist(ctx context.Context) ([]string, bool, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT setting_value
+		FROM app_settings
+		WHERE setting_key = 'price_feed_watchlist'
+	`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("load price feed watchlist: %w", err)
+	}
+	var watchlist []string
+	if err := json.Unmarshal(raw, &watchlist); err != nil {
+		return nil, false, fmt.Errorf("decode price feed watchlist: %w", err)
+	}
+	return normalizeWatchlistSymbols(watchlist), true, nil
+}
+
+func (s *PostgresStore) UpsertPriceFeedWatchlist(ctx context.Context, watchlist []string) error {
+	body, err := json.Marshal(normalizeWatchlistSymbols(watchlist))
+	if err != nil {
+		return fmt.Errorf("encode price feed watchlist: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO app_settings (setting_key, setting_value, updated_at)
+		VALUES ('price_feed_watchlist', $1::jsonb, NOW())
+		ON CONFLICT (setting_key) DO UPDATE SET
+			setting_value = EXCLUDED.setting_value,
+			updated_at = NOW()
+	`, body)
+	if err != nil {
+		return fmt.Errorf("upsert price feed watchlist: %w", err)
+	}
+	return nil
+}
+
+func normalizeWatchlistSymbols(symbols []string) []string {
+	out := make([]string, 0, len(symbols))
+	seen := make(map[string]struct{}, len(symbols))
+	for _, s := range symbols {
+		v := strings.ToUpper(strings.TrimSpace(s))
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // Append inserts a canonical event in one transaction. On idempotency conflict, returns the stored event_id.
