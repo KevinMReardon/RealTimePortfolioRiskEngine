@@ -37,6 +37,10 @@ type RouterConfig struct {
 	Insights InsightsService
 	// PrometheusEnabled gates GET /metrics exposure.
 	PrometheusEnabled bool
+	// AuthStore enables backend account/session APIs and protected routes when set.
+	AuthStore AuthStore
+	// AuthConfig controls session cookie behavior.
+	AuthConfig AuthConfig
 
 	// PriceMarksRead enables GET /v1/prices and GET /v1/prices/:symbol.
 	PriceMarksRead PriceMarksReader
@@ -72,12 +76,18 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	if cfg.Ingest != nil && len(cfg.PriceStreamPartitions) > 0 {
 		ing := router.Group("/v1")
 		ing.Use(PerIPRateLimitMiddleware(cfg.RateLimitIngest))
-		ing.POST("/trades", postTradeHandler(cfg.Ingest, logger, cfg.PriceStreamPartitions))
+		if cfg.AuthStore != nil {
+			ing.Use(requireAuth(cfg.AuthStore))
+		}
+		ing.POST("/trades", postTradeHandler(cfg.Ingest, logger, cfg.PriceStreamPartitions, cfg.PortfolioCatalog))
 		ing.POST("/prices", postPriceHandler(cfg.Ingest, logger, cfg.PriceStreamPartitions))
 	}
 	if cfg.ReadPortfolio != nil && len(cfg.PriceStreamPartitions) > 0 {
 		read := router.Group("/v1")
 		read.Use(PerIPRateLimitMiddleware(cfg.RateLimitGet))
+		if cfg.AuthStore != nil {
+			read.Use(requireAuth(cfg.AuthStore))
+		}
 		if cfg.PortfolioCatalog != nil {
 			read.GET("/portfolios", listPortfoliosHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
 			read.POST("/portfolios", createPortfolioHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
@@ -108,6 +118,14 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 				cfg.PriceFeedWatchlistStore,
 			))
 		}
+	}
+	if cfg.AuthStore != nil {
+		auth := router.Group("/v1/auth")
+		auth.Use(PerIPRateLimitMiddleware(cfg.RateLimitIngest))
+		auth.POST("/register", registerHandler(cfg.AuthStore, cfg.AuthConfig))
+		auth.POST("/login", loginHandler(cfg.AuthStore, cfg.AuthConfig))
+		auth.POST("/logout", requireAuth(cfg.AuthStore), logoutHandler(cfg.AuthStore, cfg.AuthConfig))
+		auth.GET("/me", requireAuth(cfg.AuthStore), meHandler())
 	}
 
 	return router

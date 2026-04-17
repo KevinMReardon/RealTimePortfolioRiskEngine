@@ -42,7 +42,7 @@ export function AppShell({
   const router = useRouter();
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await fetch("/api/backend/v1/auth/logout", { method: "POST" });
     router.push("/login");
     router.refresh();
   }
@@ -104,7 +104,7 @@ export function AppShell({
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-2">
-                    <span className="max-w-[160px] truncate">{user.email}</span>
+                    <span className="max-w-[160px] truncate">{user.work_email}</span>
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">
@@ -112,7 +112,8 @@ export function AppShell({
                     <div className="text-xs font-normal text-muted-foreground">
                       Signed in
                     </div>
-                    <div className="truncate text-sm">{user.email}</div>
+                    <div className="truncate text-sm">{user.display_name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{user.work_email}</div>
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={() => void logout()}>

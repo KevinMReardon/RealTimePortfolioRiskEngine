@@ -26,7 +26,11 @@ type postTradeRequest struct {
 	Trade          json.RawMessage `json:"trade" binding:"required"`
 }
 
-func postTradeHandler(svc ingestion.Service, log *zap.Logger, priceStreamPartitions []uuid.UUID) gin.HandlerFunc {
+type PortfolioOwnershipChecker interface {
+	PortfolioOwnedByUser(ctx context.Context, portfolioID, ownerUserID uuid.UUID) (bool, error)
+}
+
+func postTradeHandler(svc ingestion.Service, log *zap.Logger, priceStreamPartitions []uuid.UUID, ownership PortfolioOwnershipChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		requestID := RequestIDFromContext(c)
@@ -44,6 +48,17 @@ func postTradeHandler(svc ingestion.Service, log *zap.Logger, priceStreamPartiti
 		for _, reserved := range priceStreamPartitions {
 			if pid == reserved {
 				respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "portfolio_id is reserved for the market price stream", nil)
+				return
+			}
+		}
+		if user, ok := authUserFromContext(c); ok && ownership != nil {
+			owned, err := ownership.PortfolioOwnedByUser(c.Request.Context(), pid, user.UserID)
+			if err != nil {
+				respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
+				return
+			}
+			if !owned {
+				respondAPIError(c, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 				return
 			}
 		}

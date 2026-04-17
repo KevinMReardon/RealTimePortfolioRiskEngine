@@ -31,6 +31,7 @@ const (
 	defaultPriceFeedRetryDelayMS  = 500
 	defaultPriceFeedMaxQuoteAgeMS = 30 * 60 * 1000 // 30m
 	defaultPriceFeedDedupWindowMS = 60 * 1000      // 60s
+	defaultAuthSessionTTLSec      = 14 * 24 * 60 * 60
 )
 
 type Config struct {
@@ -133,6 +134,12 @@ type Config struct {
 	// Env: PRICE_FEED_TWELVEDATA_API_KEY, PRICE_FEED_TWELVEDATA_RATE_LIMIT_RPM.
 	PriceFeedTwelveDataAPIKey       string
 	PriceFeedTwelveDataRateLimitRPM int
+	// AuthSessionTTL controls backend session expiry.
+	// Env: AUTH_SESSION_TTL_SECONDS.
+	AuthSessionTTL time.Duration
+	// AuthCookieSecure toggles Secure flag on auth cookie.
+	// Env: AUTH_COOKIE_SECURE.
+	AuthCookieSecure bool
 }
 
 func Load() (Config, error) {
@@ -242,6 +249,10 @@ func Load() (Config, error) {
 	if twelveDataRPM < 1 {
 		twelveDataRPM = 8
 	}
+	authTTLSec := getEnvInt("AUTH_SESSION_TTL_SECONDS", defaultAuthSessionTTLSec)
+	if authTTLSec < 300 {
+		authTTLSec = defaultAuthSessionTTLSec
+	}
 	feedSymbols := parseCSVSymbols(os.Getenv("PRICE_FEED_SYMBOLS"))
 	feedPollSeconds = applyTwelveDataRateLimitSafety(feedPollSeconds, len(feedSymbols), twelveDataRPM)
 
@@ -284,6 +295,8 @@ func Load() (Config, error) {
 		PriceFeedDedupWindow:            time.Duration(dedupWindowMS) * time.Millisecond,
 		PriceFeedTwelveDataAPIKey:       strings.TrimSpace(os.Getenv("PRICE_FEED_TWELVEDATA_API_KEY")),
 		PriceFeedTwelveDataRateLimitRPM: twelveDataRPM,
+		AuthSessionTTL:                  time.Duration(authTTLSec) * time.Second,
+		AuthCookieSecure:                getEnvBool("AUTH_COOKIE_SECURE", false),
 	}
 
 	if cfg.DatabaseURL == "" {

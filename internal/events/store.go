@@ -41,10 +41,28 @@ type LatestPortfolioSnapshot struct {
 // PortfolioCatalogEntry is a user-facing portfolio directory row.
 type PortfolioCatalogEntry struct {
 	PortfolioID  uuid.UUID
+	OwnerUserID  uuid.UUID
 	Name         string
 	BaseCurrency string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type UserAccount struct {
+	UserID       uuid.UUID
+	DisplayName  string
+	WorkEmail    string
+	PasswordHash string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type UserSession struct {
+	SessionID uuid.UUID
+	UserID    uuid.UUID
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+	CreatedAt time.Time
 }
 
 // Writer contains mutating event/projection operations.
@@ -89,8 +107,26 @@ type Reader interface {
 	UpsertRiskSnapshot(ctx context.Context, portfolioID uuid.UUID, asOfEventTime time.Time, asOfEventID uuid.UUID, snapshot json.RawMessage) error
 	// ListPortfolios returns user-facing portfolio catalog rows sorted by recency.
 	ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error)
+	// ListPortfoliosByOwner returns catalog rows for exactly one owner.
+	ListPortfoliosByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]PortfolioCatalogEntry, error)
 	// CreatePortfolio inserts one portfolio catalog row.
 	CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error)
+	// CreatePortfolioForOwner inserts one owner-scoped portfolio catalog row.
+	CreatePortfolioForOwner(ctx context.Context, ownerUserID, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error)
+	// PortfolioOwnedByUser reports whether a portfolio belongs to a specific user.
+	PortfolioOwnedByUser(ctx context.Context, portfolioID, ownerUserID uuid.UUID) (bool, error)
+	// CreateUser inserts one user account row.
+	CreateUser(ctx context.Context, user UserAccount) (UserAccount, error)
+	// GetUserByEmail finds one user by work email (case-insensitive).
+	GetUserByEmail(ctx context.Context, workEmail string) (UserAccount, bool, error)
+	// GetUserByID finds one user by user id.
+	GetUserByID(ctx context.Context, userID uuid.UUID) (UserAccount, bool, error)
+	// CreateSession inserts one user session row.
+	CreateSession(ctx context.Context, session UserSession) (UserSession, error)
+	// GetSessionByID returns one session row when active and present.
+	GetSessionByID(ctx context.Context, sessionID uuid.UUID) (UserSession, bool, error)
+	// RevokeSession marks one session as revoked.
+	RevokeSession(ctx context.Context, sessionID uuid.UUID) error
 	// LoadPriceFeedWatchlist returns the persisted automated feed watchlist.
 	// found=false indicates no persisted value is present.
 	LoadPriceFeedWatchlist(ctx context.Context) (watchlist []string, found bool, err error)

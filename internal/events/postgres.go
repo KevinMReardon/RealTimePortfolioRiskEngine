@@ -33,7 +33,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 // ListPortfolios returns catalog rows ordered by newest create first.
 func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT portfolio_id, name, base_currency, created_at, updated_at
+		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
 		FROM portfolios
 		ORDER BY created_at DESC, portfolio_id ASC
 	`)
@@ -45,8 +45,33 @@ func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogE
 	out := make([]PortfolioCatalogEntry, 0)
 	for rows.Next() {
 		var e PortfolioCatalogEntry
-		if err := rows.Scan(&e.PortfolioID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan portfolio catalog row: %w", err)
+		}
+		e.CreatedAt = e.CreatedAt.UTC()
+		e.UpdatedAt = e.UpdatedAt.UTC()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]PortfolioCatalogEntry, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+		FROM portfolios
+		WHERE owner_user_id = $1
+		ORDER BY created_at DESC, portfolio_id ASC
+	`, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list portfolios by owner: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]PortfolioCatalogEntry, 0)
+	for rows.Next() {
+		var e PortfolioCatalogEntry
+		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan owner portfolio row: %w", err)
 		}
 		e.CreatedAt = e.CreatedAt.UTC()
 		e.UpdatedAt = e.UpdatedAt.UTC()
@@ -59,11 +84,12 @@ func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogE
 func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
 	var out PortfolioCatalogEntry
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO portfolios (portfolio_id, name, base_currency, created_at, updated_at)
-		VALUES ($1, $2, $3, NOW(), NOW())
-		RETURNING portfolio_id, name, base_currency, created_at, updated_at
+		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at)
+		VALUES ($1, NULL, $2, $3, NOW(), NOW())
+		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
 	`, portfolioID, name, baseCurrency).Scan(
 		&out.PortfolioID,
+		&out.OwnerUserID,
 		&out.Name,
 		&out.BaseCurrency,
 		&out.CreatedAt,
@@ -75,6 +101,176 @@ func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UU
 	out.CreatedAt = out.CreatedAt.UTC()
 	out.UpdatedAt = out.UpdatedAt.UTC()
 	return out, nil
+}
+
+func (s *PostgresStore) CreatePortfolioForOwner(ctx context.Context, ownerUserID, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
+	var out PortfolioCatalogEntry
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, NOW(), NOW())
+		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+	`, portfolioID, ownerUserID, name, baseCurrency).Scan(
+		&out.PortfolioID,
+		&out.OwnerUserID,
+		&out.Name,
+		&out.BaseCurrency,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if err != nil {
+		return PortfolioCatalogEntry{}, fmt.Errorf("create owner portfolio row: %w", err)
+	}
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	return out, nil
+}
+
+func (s *PostgresStore) PortfolioOwnedByUser(ctx context.Context, portfolioID, ownerUserID uuid.UUID) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM portfolios
+			WHERE portfolio_id = $1 AND owner_user_id = $2
+		)
+	`, portfolioID, ownerUserID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("check portfolio owner: %w", err)
+	}
+	return ok, nil
+}
+
+func (s *PostgresStore) CreateUser(ctx context.Context, user UserAccount) (UserAccount, error) {
+	var out UserAccount
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO users (user_id, display_name, work_email, password_hash, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, NOW(), NOW())
+		RETURNING user_id, display_name, work_email, password_hash, created_at, updated_at
+	`, user.UserID, user.DisplayName, strings.ToLower(strings.TrimSpace(user.WorkEmail)), user.PasswordHash).Scan(
+		&out.UserID,
+		&out.DisplayName,
+		&out.WorkEmail,
+		&out.PasswordHash,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if err != nil {
+		return UserAccount{}, fmt.Errorf("create user: %w", err)
+	}
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	return out, nil
+}
+
+func (s *PostgresStore) GetUserByEmail(ctx context.Context, workEmail string) (UserAccount, bool, error) {
+	var out UserAccount
+	err := s.pool.QueryRow(ctx, `
+		SELECT user_id, display_name, work_email, password_hash, created_at, updated_at
+		FROM users
+		WHERE LOWER(work_email) = LOWER($1)
+	`, strings.ToLower(strings.TrimSpace(workEmail))).Scan(
+		&out.UserID,
+		&out.DisplayName,
+		&out.WorkEmail,
+		&out.PasswordHash,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UserAccount{}, false, nil
+	}
+	if err != nil {
+		return UserAccount{}, false, fmt.Errorf("get user by email: %w", err)
+	}
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	return out, true, nil
+}
+
+func (s *PostgresStore) GetUserByID(ctx context.Context, userID uuid.UUID) (UserAccount, bool, error) {
+	var out UserAccount
+	err := s.pool.QueryRow(ctx, `
+		SELECT user_id, display_name, work_email, password_hash, created_at, updated_at
+		FROM users
+		WHERE user_id = $1
+	`, userID).Scan(
+		&out.UserID,
+		&out.DisplayName,
+		&out.WorkEmail,
+		&out.PasswordHash,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UserAccount{}, false, nil
+	}
+	if err != nil {
+		return UserAccount{}, false, fmt.Errorf("get user by id: %w", err)
+	}
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	return out, true, nil
+}
+
+func (s *PostgresStore) CreateSession(ctx context.Context, session UserSession) (UserSession, error) {
+	var out UserSession
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO user_sessions (session_id, user_id, expires_at, revoked_at, created_at)
+		VALUES ($1, $2, $3, NULL, NOW())
+		RETURNING session_id, user_id, expires_at, revoked_at, created_at
+	`, session.SessionID, session.UserID, session.ExpiresAt.UTC()).Scan(
+		&out.SessionID,
+		&out.UserID,
+		&out.ExpiresAt,
+		&out.RevokedAt,
+		&out.CreatedAt,
+	)
+	if err != nil {
+		return UserSession{}, fmt.Errorf("create session: %w", err)
+	}
+	out.ExpiresAt = out.ExpiresAt.UTC()
+	out.CreatedAt = out.CreatedAt.UTC()
+	return out, nil
+}
+
+func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID) (UserSession, bool, error) {
+	var out UserSession
+	err := s.pool.QueryRow(ctx, `
+		SELECT session_id, user_id, expires_at, revoked_at, created_at
+		FROM user_sessions
+		WHERE session_id = $1
+	`, sessionID).Scan(
+		&out.SessionID,
+		&out.UserID,
+		&out.ExpiresAt,
+		&out.RevokedAt,
+		&out.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UserSession{}, false, nil
+	}
+	if err != nil {
+		return UserSession{}, false, fmt.Errorf("get session: %w", err)
+	}
+	out.ExpiresAt = out.ExpiresAt.UTC()
+	out.CreatedAt = out.CreatedAt.UTC()
+	if out.RevokedAt != nil {
+		v := out.RevokedAt.UTC()
+		out.RevokedAt = &v
+	}
+	return out, true, nil
+}
+
+func (s *PostgresStore) RevokeSession(ctx context.Context, sessionID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE user_sessions
+		SET revoked_at = NOW()
+		WHERE session_id = $1
+	`, sessionID)
+	if err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) LoadPriceFeedWatchlist(ctx context.Context) ([]string, bool, error) {

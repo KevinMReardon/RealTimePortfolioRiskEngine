@@ -15,8 +15,7 @@ export default function LoginPage() {
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
           <p className="text-sm text-muted-foreground">
-            This UI gates access with a session cookie. Wire it to your identity provider when
-            you add real auth to the Go API.
+            Sign in with your account to see only portfolios you own.
           </p>
         </div>
 
@@ -24,7 +23,7 @@ export default function LoginPage() {
           <CardHeader>
             <CardTitle>Welcome back</CardTitle>
             <CardDescription>
-              Use any email for now — password is ignored (demo UX).
+              Use your work email and password.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -35,10 +34,9 @@ export default function LoginPage() {
         </Card>
 
         <p className="text-center text-xs text-muted-foreground sm:text-left">
-          Backend proxy target is configured with{" "}
-          <span className="font-mono">BACKEND_URL</span>.{" "}
-          <Link className="underline underline-offset-4" href="/dashboard">
-            Try the console
+          Need an account?{" "}
+          <Link className="underline underline-offset-4" href="/register">
+            Create one
           </Link>
         </p>
       </div>

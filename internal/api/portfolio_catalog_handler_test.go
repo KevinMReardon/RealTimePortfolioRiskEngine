@@ -18,8 +18,10 @@ import (
 )
 
 type fakePortfolioCatalogStore struct {
-	rows []events.PortfolioCatalogEntry
-	err  error
+	rows         []events.PortfolioCatalogEntry
+	err          error
+	ownershipOK  bool
+	ownershipSet bool
 }
 
 func (f *fakePortfolioCatalogStore) ListPortfolios(ctx context.Context) ([]events.PortfolioCatalogEntry, error) {
@@ -27,6 +29,11 @@ func (f *fakePortfolioCatalogStore) ListPortfolios(ctx context.Context) ([]event
 		return nil, f.err
 	}
 	return append([]events.PortfolioCatalogEntry(nil), f.rows...), nil
+}
+
+func (f *fakePortfolioCatalogStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]events.PortfolioCatalogEntry, error) {
+	_ = ownerUserID
+	return f.ListPortfolios(ctx)
 }
 
 func (f *fakePortfolioCatalogStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (events.PortfolioCatalogEntry, error) {
@@ -45,11 +52,28 @@ func (f *fakePortfolioCatalogStore) CreatePortfolio(ctx context.Context, portfol
 	return row, nil
 }
 
+func (f *fakePortfolioCatalogStore) CreatePortfolioForOwner(ctx context.Context, ownerUserID, portfolioID uuid.UUID, name, baseCurrency string) (events.PortfolioCatalogEntry, error) {
+	_ = ownerUserID
+	return f.CreatePortfolio(ctx, portfolioID, name, baseCurrency)
+}
+
+func (f *fakePortfolioCatalogStore) PortfolioOwnedByUser(ctx context.Context, portfolioID, ownerUserID uuid.UUID) (bool, error) {
+	_ = ctx
+	_ = portfolioID
+	_ = ownerUserID
+	if f.ownershipSet {
+		return f.ownershipOK, nil
+	}
+	return true, nil
+}
+
 func TestPortfolioCatalog_ListAndCreate(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	store := &fakePortfolioCatalogStore{
+		ownershipOK:  true,
+		ownershipSet: true,
 		rows: []events.PortfolioCatalogEntry{
 			{
 				PortfolioID:  uuid.MustParse("550e8400-e29b-41d4-a716-446655440111"),
