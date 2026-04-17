@@ -194,3 +194,64 @@ export type InsightsExplainResponse = {
   used_metrics: string[];
   model: string;
 };
+
+export type PriceListItem = {
+  symbol: string;
+  price: string;
+  change_pct?: string;
+  as_of: string;
+  updated_at: string;
+  source: string;
+  staleness_seconds: number;
+  provider_data_status: string;
+};
+
+export type ListPricesResponse = {
+  items: PriceListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type PriceHistoryPoint = {
+  return_date: string;
+  close_price: string;
+  daily_return?: string;
+  as_of_event_time: string;
+};
+
+export type PriceDetailResponse = {
+  symbol: string;
+  price: string;
+  as_of: string;
+  updated_at: string;
+  source: string;
+  history: PriceHistoryPoint[];
+  history_summary: string;
+  staleness_seconds: number;
+  provider_data_status: string;
+};
+
+export type PriceFeedStatusResponse = {
+  feed_enabled: boolean;
+  configured_provider: string;
+  poll_interval_ms: number;
+  watchlist_count: number;
+  watchlist_preview?: string[];
+  staleness_threshold_seconds: number;
+  last_tick_started_at?: string;
+  last_tick_finished_at?: string;
+  last_successful_fetch_at?: string;
+  active_provider?: string;
+  last_tick_used_failover: boolean;
+  last_tick_ingested_count?: number;
+  last_error?: string;
+};
+
+export type PriceFeedWatchlistResponse = {
+  watchlist: string[];
+};
+
+export type UpdatePriceFeedWatchlistRequest = {
+  watchlist: string[];
+};

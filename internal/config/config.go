@@ -24,6 +24,13 @@ const (
 	defaultRiskSigmaWindowN        = 60
 	// defaultPriceStreamPortfolioID namespaces derived price partition UUIDs (not used as a row key itself when shards>0).
 	defaultPriceStreamPortfolioID = "00000000-0000-4000-8000-000000000001"
+	defaultPriceFeedProvider      = "twelvedata"
+	defaultPriceFeedPollSeconds   = 60
+	defaultPriceFeedHTTPTimeoutMS = 5000
+	defaultPriceFeedRetryCount    = 3
+	defaultPriceFeedRetryDelayMS  = 500
+	defaultPriceFeedMaxQuoteAgeMS = 30 * 60 * 1000 // 30m
+	defaultPriceFeedDedupWindowMS = 60 * 1000      // 60s
 )
 
 type Config struct {
@@ -93,6 +100,39 @@ type Config struct {
 	// PrometheusEnabled toggles GET /metrics exposure.
 	// Env: PROMETHEUS_ENABLED.
 	PrometheusEnabled bool
+
+	// PriceFeedEnabled toggles automated provider polling.
+	// Env: PRICE_FEED_ENABLED.
+	PriceFeedEnabled bool
+	// PriceFeedProvider selects the active provider adapter.
+	// Env: PRICE_FEED_PROVIDER (currently only "twelvedata" is supported).
+	PriceFeedProvider string
+	// PriceFeedPollInterval is provider fetch cadence.
+	// Env: PRICE_FEED_POLL_SECONDS.
+	PriceFeedPollInterval time.Duration
+	// PriceFeedSymbols is the configured watchlist.
+	// Env: PRICE_FEED_SYMBOLS (comma-separated).
+	PriceFeedSymbols []string
+	// PriceFeedHTTPTimeout is request timeout per provider call.
+	// Env: PRICE_FEED_HTTP_TIMEOUT_MS.
+	PriceFeedHTTPTimeout time.Duration
+	// PriceFeedMaxRetries is retry attempts for transient failures.
+	// Env: PRICE_FEED_RETRY_COUNT.
+	PriceFeedMaxRetries int
+	// PriceFeedRetryDelay is base delay between retries.
+	// Env: PRICE_FEED_RETRY_DELAY_MS.
+	PriceFeedRetryDelay time.Duration
+	// PriceFeedMaxQuoteAge rejects upstream quotes whose as-of time is older than this (0 disables).
+	// Env: PRICE_FEED_MAX_QUOTE_AGE_MS.
+	PriceFeedMaxQuoteAge time.Duration
+	// PriceFeedDedupWindow skips ingest when the same symbol price repeats within this window (0 disables).
+	// Env: PRICE_FEED_DEDUP_WINDOW_MS.
+	PriceFeedDedupWindow time.Duration
+
+	// Twelve Data credentials and rate caps.
+	// Env: PRICE_FEED_TWELVEDATA_API_KEY, PRICE_FEED_TWELVEDATA_RATE_LIMIT_RPM.
+	PriceFeedTwelveDataAPIKey       string
+	PriceFeedTwelveDataRateLimitRPM int
 }
 
 func Load() (Config, error) {
@@ -170,35 +210,80 @@ func Load() (Config, error) {
 	openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	openAIBase := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	openAIModel := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+	feedProvider := strings.ToLower(strings.TrimSpace(getEnv("PRICE_FEED_PROVIDER", defaultPriceFeedProvider)))
+	if feedProvider == "" || feedProvider != defaultPriceFeedProvider {
+		feedProvider = defaultPriceFeedProvider
+	}
+	feedPollSeconds := getEnvInt("PRICE_FEED_POLL_SECONDS", defaultPriceFeedPollSeconds)
+	if feedPollSeconds < 1 {
+		feedPollSeconds = defaultPriceFeedPollSeconds
+	}
+	feedTimeoutMS := getEnvInt("PRICE_FEED_HTTP_TIMEOUT_MS", defaultPriceFeedHTTPTimeoutMS)
+	if feedTimeoutMS < 100 {
+		feedTimeoutMS = defaultPriceFeedHTTPTimeoutMS
+	}
+	feedRetryCount := getEnvInt("PRICE_FEED_RETRY_COUNT", defaultPriceFeedRetryCount)
+	if feedRetryCount < 0 {
+		feedRetryCount = 0
+	}
+	feedRetryDelayMS := getEnvInt("PRICE_FEED_RETRY_DELAY_MS", defaultPriceFeedRetryDelayMS)
+	if feedRetryDelayMS < 0 {
+		feedRetryDelayMS = defaultPriceFeedRetryDelayMS
+	}
+	maxQuoteAgeMS := getEnvInt("PRICE_FEED_MAX_QUOTE_AGE_MS", defaultPriceFeedMaxQuoteAgeMS)
+	if maxQuoteAgeMS < 0 {
+		maxQuoteAgeMS = 0
+	}
+	dedupWindowMS := getEnvInt("PRICE_FEED_DEDUP_WINDOW_MS", defaultPriceFeedDedupWindowMS)
+	if dedupWindowMS < 0 {
+		dedupWindowMS = 0
+	}
+	twelveDataRPM := getEnvInt("PRICE_FEED_TWELVEDATA_RATE_LIMIT_RPM", 8)
+	if twelveDataRPM < 1 {
+		twelveDataRPM = 8
+	}
+	feedSymbols := parseCSVSymbols(os.Getenv("PRICE_FEED_SYMBOLS"))
+	feedPollSeconds = applyTwelveDataRateLimitSafety(feedPollSeconds, len(feedSymbols), twelveDataRPM)
 
 	cfg := Config{
-		Port:                       getEnv("PORT", defaultPort),
-		DatabaseURL:                os.Getenv("DATABASE_URL"),
-		ShutdownTimeout:            time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeoutSecond)) * time.Second,
-		OrderingWatermark:          time.Duration(wmMs) * time.Millisecond,
-		OrderingMaxEventAge:        time.Duration(maxEventAgeMs) * time.Millisecond,
-		ApplyWorkerTick:            time.Duration(tickMs) * time.Millisecond,
-		ApplyWorkerCount:           workers,
-		PriceStreamNamespace:       priceNS,
-		PriceStreamPartitions:      partitions,
-		PriceStreamShardCount:      priceShards,
-		PriceApplyWorkerCount:      priceWorkers,
-		RiskRecomputeDebounce:      time.Duration(riskDebounceMs) * time.Millisecond,
-		RiskSigmaWindowN:           riskWindowN,
-		RiskSnapshotWriteEnabled:   getEnvBool("RISK_SNAPSHOT_WRITE_ENABLED", false),
-		SnapshotEnabled:            snapshotEnabled,
-		PortfolioSnapshotMinEvents: portfolioSnapN,
-		PortfolioSnapshotInterval:  time.Duration(portfolioSnapSec) * time.Second,
-		RateLimitIngestEnabled:     getEnvBool("HTTP_RATE_LIMIT_INGEST_ENABLED", false),
-		RateLimitIngestRPS:         ingestRPS,
-		RateLimitIngestBurst:       ingestBurst,
-		RateLimitGetEnabled:        getEnvBool("HTTP_RATE_LIMIT_GET_ENABLED", false),
-		RateLimitGetRPS:            getRPS,
-		RateLimitGetBurst:          getBurst,
-		OpenAIAPIKey:               openAIKey,
-		OpenAIBaseURL:              openAIBase,
-		OpenAIModel:                openAIModel,
-		PrometheusEnabled:          getEnvBool("PROMETHEUS_ENABLED", false),
+		Port:                            getEnv("PORT", defaultPort),
+		DatabaseURL:                     os.Getenv("DATABASE_URL"),
+		ShutdownTimeout:                 time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeoutSecond)) * time.Second,
+		OrderingWatermark:               time.Duration(wmMs) * time.Millisecond,
+		OrderingMaxEventAge:             time.Duration(maxEventAgeMs) * time.Millisecond,
+		ApplyWorkerTick:                 time.Duration(tickMs) * time.Millisecond,
+		ApplyWorkerCount:                workers,
+		PriceStreamNamespace:            priceNS,
+		PriceStreamPartitions:           partitions,
+		PriceStreamShardCount:           priceShards,
+		PriceApplyWorkerCount:           priceWorkers,
+		RiskRecomputeDebounce:           time.Duration(riskDebounceMs) * time.Millisecond,
+		RiskSigmaWindowN:                riskWindowN,
+		RiskSnapshotWriteEnabled:        getEnvBool("RISK_SNAPSHOT_WRITE_ENABLED", false),
+		SnapshotEnabled:                 snapshotEnabled,
+		PortfolioSnapshotMinEvents:      portfolioSnapN,
+		PortfolioSnapshotInterval:       time.Duration(portfolioSnapSec) * time.Second,
+		RateLimitIngestEnabled:          getEnvBool("HTTP_RATE_LIMIT_INGEST_ENABLED", false),
+		RateLimitIngestRPS:              ingestRPS,
+		RateLimitIngestBurst:            ingestBurst,
+		RateLimitGetEnabled:             getEnvBool("HTTP_RATE_LIMIT_GET_ENABLED", false),
+		RateLimitGetRPS:                 getRPS,
+		RateLimitGetBurst:               getBurst,
+		OpenAIAPIKey:                    openAIKey,
+		OpenAIBaseURL:                   openAIBase,
+		OpenAIModel:                     openAIModel,
+		PrometheusEnabled:               getEnvBool("PROMETHEUS_ENABLED", false),
+		PriceFeedEnabled:                getEnvBool("PRICE_FEED_ENABLED", false),
+		PriceFeedProvider:               feedProvider,
+		PriceFeedPollInterval:           time.Duration(feedPollSeconds) * time.Second,
+		PriceFeedSymbols:                feedSymbols,
+		PriceFeedHTTPTimeout:            time.Duration(feedTimeoutMS) * time.Millisecond,
+		PriceFeedMaxRetries:             feedRetryCount,
+		PriceFeedRetryDelay:             time.Duration(feedRetryDelayMS) * time.Millisecond,
+		PriceFeedMaxQuoteAge:            time.Duration(maxQuoteAgeMS) * time.Millisecond,
+		PriceFeedDedupWindow:            time.Duration(dedupWindowMS) * time.Millisecond,
+		PriceFeedTwelveDataAPIKey:       strings.TrimSpace(os.Getenv("PRICE_FEED_TWELVEDATA_API_KEY")),
+		PriceFeedTwelveDataRateLimitRPM: twelveDataRPM,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -257,6 +342,46 @@ func getEnvIntFromKeys(keys []string, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func parseCSVSymbols(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		s := strings.ToUpper(strings.TrimSpace(part))
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// applyTwelveDataRateLimitSafety raises poll interval when needed so
+// request rate (assuming one request per symbol per poll) does not exceed RPM.
+func applyTwelveDataRateLimitSafety(pollSeconds, symbolCount, rpm int) int {
+	if pollSeconds < 1 {
+		pollSeconds = 1
+	}
+	if symbolCount < 1 || rpm < 1 {
+		return pollSeconds
+	}
+	minPollSeconds := ((symbolCount * 60) + rpm - 1) / rpm // ceil(symbolCount*60/rpm)
+	if minPollSeconds < 1 {
+		minPollSeconds = 1
+	}
+	if pollSeconds < minPollSeconds {
+		return minPollSeconds
+	}
+	return pollSeconds
 }
 
 // DerivePriceStreamPartitions returns deterministic synthetic events.portfolio_id values for

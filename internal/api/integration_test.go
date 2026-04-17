@@ -65,6 +65,10 @@ func integrationRouter(pool *pgxpool.Pool, log *zap.Logger) *gin.Engine {
 		RiskRead:              repo,
 		RiskSigmaWindowN:      60,
 		PriceStreamPartitions: integrationPricePartitions(),
+		PriceMarksRead:        repo,
+		PriceFeedEnabled:      false,
+		PriceFeedProvider:     "twelvedata",
+		PriceFeedPollInterval: time.Minute,
 	})
 }
 

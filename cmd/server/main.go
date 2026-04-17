@@ -7,14 +7,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/api"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/insights"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/insights"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/risk"
 	"github.com/google/uuid"
@@ -59,6 +61,35 @@ func run() error {
 	}
 
 	ingestSvc := ingestion.NewService(repo)
+	var feedWG sync.WaitGroup
+	feedCtx, feedCancel := context.WithCancel(context.Background())
+	defer feedCancel()
+	var priceFeedRuntime *pricefeed.RuntimeTracker
+	var priceFeedRunner *pricefeed.PriceIngestor
+	if cfg.PriceFeedEnabled {
+		feedRunner, rt, err := pricefeed.NewFromConfig(ingestSvc, cfg, logger)
+		if err != nil {
+			return err
+		}
+		priceFeedRunner = feedRunner
+		priceFeedRuntime = rt
+		feedWG.Add(1)
+		go func() {
+			defer feedWG.Done()
+			if err := feedRunner.Start(feedCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("price_feed_runner_exit", zap.Error(err))
+			}
+		}()
+		logger.Info("price_feed_started",
+			zap.Duration("interval", cfg.PriceFeedPollInterval),
+			zap.Int("symbols", len(cfg.PriceFeedSymbols)),
+			zap.Int("max_retries", cfg.PriceFeedMaxRetries),
+			zap.Duration("retry_delay", cfg.PriceFeedRetryDelay),
+			zap.Duration("max_quote_age", cfg.PriceFeedMaxQuoteAge),
+			zap.Duration("dedup_window", cfg.PriceFeedDedupWindow),
+			zap.Int("provider_rate_limit_rpm", cfg.PriceFeedTwelveDataRateLimitRPM),
+		)
+	}
 
 	var ingestRL *api.PerIPRateLimiter
 	if cfg.RateLimitIngestEnabled {
@@ -91,17 +122,23 @@ func run() error {
 	}
 
 	router := api.NewRouter(api.RouterConfig{
-		Logger:                logger,
-		Ingest:                ingestSvc,
-		ReadPortfolio:         repo,
-		PortfolioCatalog:      repo,
-		RiskRead:              repo,
-		RiskSigmaWindowN:      cfg.RiskSigmaWindowN,
-		PriceStreamPartitions: cfg.PriceStreamPartitions,
-		RateLimitIngest:       ingestRL,
-		RateLimitGet:          getRL,
-		Insights:              insightsSvc,
-		PrometheusEnabled:     cfg.PrometheusEnabled,
+		Logger:                    logger,
+		Ingest:                    ingestSvc,
+		ReadPortfolio:             repo,
+		PortfolioCatalog:          repo,
+		RiskRead:                  repo,
+		RiskSigmaWindowN:          cfg.RiskSigmaWindowN,
+		PriceStreamPartitions:     cfg.PriceStreamPartitions,
+		RateLimitIngest:           ingestRL,
+		RateLimitGet:              getRL,
+		Insights:                  insightsSvc,
+		PrometheusEnabled:         cfg.PrometheusEnabled,
+		PriceMarksRead:            repo,
+		PriceFeedRuntime:          priceFeedRuntime,
+		PriceFeedEnabled:          cfg.PriceFeedEnabled,
+		PriceFeedProvider:         cfg.PriceFeedProvider,
+		PriceFeedPollInterval:     cfg.PriceFeedPollInterval,
+		PriceFeedWatchlistManager: priceFeedRunner,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -132,6 +169,20 @@ func run() error {
 
 	if err := stopWorkers(shutdownCtx); err != nil {
 		return err
+	}
+	feedCancel()
+	feedStopped := make(chan struct{})
+	go func() {
+		defer close(feedStopped)
+		feedWG.Wait()
+	}()
+	select {
+	case <-feedStopped:
+	case <-shutdownCtx.Done():
+		return shutdownCtx.Err()
+	}
+	if cfg.PriceFeedEnabled {
+		logger.Info("price_feed_stopped")
 	}
 
 	if err := server.Shutdown(shutdownCtx); err != nil {

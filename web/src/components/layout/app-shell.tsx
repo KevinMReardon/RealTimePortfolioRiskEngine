@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Activity,
   ArrowLeftRight,
+  BarChart3,
   LayoutDashboard,
   LineChart,
   LogOut,
@@ -28,7 +28,7 @@ const nav = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/portfolios", label: "Portfolios", icon: LineChart },
   { href: "/ingest/trade", label: "Record trade", icon: ArrowLeftRight },
-  { href: "/ingest/price", label: "Record price", icon: Activity },
+  { href: "/ingest/price", label: "Price data", icon: BarChart3 },
 ] as const;
 
 export function AppShell({

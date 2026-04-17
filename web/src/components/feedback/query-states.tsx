@@ -12,11 +12,13 @@ export function LoadingCardGrid() {
   );
 }
 
-export function ErrorAlert({ error }: { error: unknown }) {
+export function ErrorAlert({ error, title }: { error: unknown; title?: string }) {
   const api = error instanceof ApiError ? error : null;
   return (
     <Alert variant="destructive">
-      <AlertTitle>{api?.body?.error_code ?? "Request failed"}</AlertTitle>
+      <AlertTitle>
+        {title ?? api?.body?.error_code ?? "Request failed"}
+      </AlertTitle>
       <AlertDescription className="space-y-2">
         <div>{error instanceof Error ? error.message : "Unknown error"}</div>
         {api?.body?.request_id ? (

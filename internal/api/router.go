@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 )
 
@@ -36,6 +37,18 @@ type RouterConfig struct {
 	Insights InsightsService
 	// PrometheusEnabled gates GET /metrics exposure.
 	PrometheusEnabled bool
+
+	// PriceMarksRead enables GET /v1/prices and GET /v1/prices/:symbol.
+	PriceMarksRead PriceMarksReader
+	// PriceFeedRuntime is optional in-process feed telemetry (nil when PRICE_FEED_ENABLED=false).
+	PriceFeedRuntime *pricefeed.RuntimeTracker
+	PriceFeedEnabled bool
+	// PriceFeedProvider is the configured adapter name (e.g. twelvedata).
+	PriceFeedProvider string
+	// PriceFeedPollInterval is used for staleness thresholds in price list rows.
+	PriceFeedPollInterval time.Duration
+	// PriceFeedWatchlistManager exposes in-process watchlist read/write controls.
+	PriceFeedWatchlistManager PriceFeedWatchlistManager
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -73,6 +86,23 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		}
 		read.POST("/portfolios/:id/scenarios", postScenarioHandler(cfg.ReadPortfolio, logger, cfg.PriceStreamPartitions))
 		read.POST("/portfolios/:id/insights/explain", postInsightsExplainHandler(cfg.ReadPortfolio, cfg.RiskRead, cfg.Insights, logger, cfg.PriceStreamPartitions, cfg.RiskSigmaWindowN))
+		if cfg.PriceMarksRead != nil {
+			staleAfter := 3 * cfg.PriceFeedPollInterval
+			if staleAfter <= 0 {
+				staleAfter = 15 * time.Minute
+			}
+			read.GET("/prices", listPricesHandler(cfg.PriceMarksRead, logger, staleAfter))
+			read.GET("/prices/:symbol", getPriceSymbolHandler(cfg.PriceMarksRead, logger, staleAfter))
+			read.GET("/price-feed/status", getPriceFeedStatusHandler(
+				cfg.PriceFeedRuntime,
+				cfg.PriceFeedEnabled,
+				cfg.PriceFeedProvider,
+				cfg.PriceFeedPollInterval,
+				cfg.PriceFeedWatchlistManager,
+			))
+			read.GET("/price-feed/watchlist", getPriceFeedWatchlistHandler(cfg.PriceFeedWatchlistManager))
+			read.PUT("/price-feed/watchlist", putPriceFeedWatchlistHandler(cfg.PriceFeedWatchlistManager))
+		}
 	}
 
 	return router
