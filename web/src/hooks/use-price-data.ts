@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
+import { errorHttpStatus } from "@/lib/api/errors";
 import {
   getPriceFeedWatchlist,
   getPriceFeedStatus,
@@ -33,7 +34,8 @@ export function usePriceFeedStatusQuery(): UseQueryResult<
   return useQuery({
     queryKey: priceQueryKeys.feedStatus(),
     queryFn: () => getPriceFeedStatus(),
-    refetchInterval: 15_000,
+    refetchInterval: (query) =>
+      errorHttpStatus(query.state.error) === 401 ? false : 15_000,
   });
 }
 
@@ -49,7 +51,8 @@ export function usePriceFeedWatchlistQuery() {
   return useQuery({
     queryKey: priceQueryKeys.watchlist(),
     queryFn: () => getPriceFeedWatchlist(),
-    refetchInterval: 15_000,
+    refetchInterval: (query) =>
+      errorHttpStatus(query.state.error) === 401 ? false : 15_000,
   });
 }
 

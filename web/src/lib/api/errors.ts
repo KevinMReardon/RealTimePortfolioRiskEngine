@@ -1,5 +1,12 @@
 import type { APIErrorBody } from "@/lib/api/types";
 
+/** Use when catching unknown errors — instanceof ApiError can fail across bundles */
+export function errorHttpStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly body: APIErrorBody | null;
