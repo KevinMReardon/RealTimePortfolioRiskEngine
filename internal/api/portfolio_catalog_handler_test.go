@@ -67,6 +67,16 @@ func (f *fakePortfolioCatalogStore) PortfolioOwnedByUser(ctx context.Context, po
 	return true, nil
 }
 
+func (f *fakePortfolioCatalogStore) UpsertPortfolioAlpacaLink(ctx context.Context, portfolioID uuid.UUID, link events.AlpacaPortfolioLinkInput) error {
+	_ = ctx
+	_ = portfolioID
+	_ = link
+	if f.err != nil {
+		return f.err
+	}
+	return nil
+}
+
 func TestPortfolioCatalog_ListAndCreate(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -89,6 +99,7 @@ func TestPortfolioCatalog_ListAndCreate(t *testing.T) {
 		ReadPortfolio:         &fakePortfolioReadStore{found: false},
 		PortfolioCatalog:      store,
 		PriceStreamPartitions: testPricePartitions,
+		SingleUserApp:         false,
 	})
 
 	t.Run("list_200", func(t *testing.T) {
@@ -156,6 +167,7 @@ func TestPortfolioCatalog_StoreFailure(t *testing.T) {
 		ReadPortfolio:         &fakePortfolioReadStore{found: false},
 		PortfolioCatalog:      &fakePortfolioCatalogStore{err: errors.New("db down")},
 		PriceStreamPartitions: testPricePartitions,
+		SingleUserApp:         false,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/portfolios", nil)
@@ -166,4 +178,43 @@ func TestPortfolioCatalog_StoreFailure(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	assertAPIErrorEnvelope(t, rec.Body.Bytes(), ErrCodeInternal, "internal error", fixedRequestID)
+}
+
+func TestPortfolioCatalog_SingleUserBlocksSecondRow(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	store := &fakePortfolioCatalogStore{
+		ownershipOK:  true,
+		ownershipSet: true,
+		rows: []events.PortfolioCatalogEntry{
+			{
+				PortfolioID:  uuid.MustParse("550e8400-e29b-41d4-a716-446655440111"),
+				Name:         "Only",
+				BaseCurrency: "USD",
+				CreatedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				UpdatedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	r := NewRouter(RouterConfig{
+		Logger:                zap.NewNop(),
+		ReadPortfolio:         &fakePortfolioReadStore{found: false},
+		PortfolioCatalog:      store,
+		PriceStreamPartitions: testPricePartitions,
+		SingleUserApp:         true,
+	})
+
+	body := []byte(`{"name":"Second","base_currency":"USD"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/portfolios", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(RequestIDHeader, fixedRequestID)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertAPIErrorEnvelope(t, rec.Body.Bytes(), ErrCodeConflict,
+		"only one portfolio is allowed in single-user mode; set SINGLE_USER_APP=false for multiple portfolios",
+		fixedRequestID)
 }

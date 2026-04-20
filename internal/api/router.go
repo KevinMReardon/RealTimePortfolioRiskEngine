@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
@@ -41,13 +42,15 @@ type RouterConfig struct {
 	AuthStore AuthStore
 	// AuthConfig controls session cookie behavior.
 	AuthConfig AuthConfig
+	// SingleUserApp rejects creating a second catalog portfolio when true (matches config.SINGLE_USER_APP).
+	SingleUserApp bool
 
 	// PriceMarksRead enables GET /v1/prices and GET /v1/prices/:symbol.
 	PriceMarksRead PriceMarksReader
 	// PriceFeedRuntime is optional in-process feed telemetry (nil when PRICE_FEED_ENABLED=false).
 	PriceFeedRuntime *pricefeed.RuntimeTracker
 	PriceFeedEnabled bool
-	// PriceFeedProvider is the configured adapter name (e.g. twelvedata).
+	// PriceFeedProvider is the configured adapter name: twelvedata or alpaca.
 	PriceFeedProvider string
 	// PriceFeedPollInterval is used for staleness thresholds in price list rows.
 	PriceFeedPollInterval time.Duration
@@ -55,6 +58,16 @@ type RouterConfig struct {
 	PriceFeedWatchlistManager PriceFeedWatchlistManager
 	// PriceFeedWatchlistStore persists watchlist changes across restarts.
 	PriceFeedWatchlistStore PriceFeedWatchlistPersistence
+
+	// AlpacaImportJobs enables POST enqueue + GET status when non-nil and AlpacaImportEnabled.
+	AlpacaImportJobs    AlpacaImportStore
+	AlpacaImportEnabled bool
+	// AlpacaREST is the trading API client; nil when keys are not configured.
+	AlpacaREST alpaca.REST
+	// AlpacaSyncStore reads per-portfolio rows in alpaca_sync_state; may be non-nil when pool exists.
+	AlpacaSyncStore *alpaca.SyncStateStore
+	// AlpacaConfigured is true when the process successfully constructed an Alpaca REST client.
+	AlpacaConfigured bool
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -90,9 +103,24 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		}
 		if cfg.PortfolioCatalog != nil {
 			read.GET("/portfolios", listPortfoliosHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
-			read.POST("/portfolios", createPortfolioHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions))
+			read.POST("/portfolios", createPortfolioHandler(cfg.PortfolioCatalog, logger, cfg.PriceStreamPartitions, cfg.SingleUserApp))
 		}
 		read.GET("/portfolios/:id", getPortfolioHandler(cfg.ReadPortfolio, logger, cfg.PriceStreamPartitions))
+		read.GET("/portfolios/:id/alpaca/status", getAlpacaPortfolioStatusHandler(
+			cfg.ReadPortfolio,
+			cfg.AlpacaSyncStore,
+			cfg.AlpacaREST,
+			cfg.AlpacaConfigured,
+			logger,
+			cfg.PriceStreamPartitions,
+		))
+		read.GET("/portfolios/:id/alpaca/reconciliation", getAlpacaPortfolioReconciliationHandler(
+			cfg.ReadPortfolio,
+			cfg.AlpacaREST,
+			cfg.AlpacaConfigured,
+			logger,
+			cfg.PriceStreamPartitions,
+		))
 		if cfg.RiskRead != nil {
 			read.GET("/portfolios/:id/risk", getRiskHandler(cfg.RiskRead, logger, cfg.PriceStreamPartitions, cfg.RiskSigmaWindowN))
 		}
@@ -118,17 +146,45 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 				cfg.PriceFeedWatchlistStore,
 			))
 		}
+		if cfg.AlpacaImportJobs != nil {
+			read.POST("/portfolios/:id/alpaca-import", postAlpacaImportHandler(
+				cfg.AlpacaImportJobs,
+				logger,
+				cfg.PriceStreamPartitions,
+				portfolioOwnershipChecker(cfg.ReadPortfolio),
+				cfg.AlpacaImportEnabled,
+			))
+			read.GET("/alpaca-import-jobs/:job_id", getAlpacaImportJobHandler(
+				cfg.AlpacaImportJobs,
+				logger,
+				portfolioOwnershipChecker(cfg.ReadPortfolio),
+				cfg.AlpacaImportEnabled,
+			))
+		}
 	}
 	if cfg.AuthStore != nil {
 		auth := router.Group("/v1/auth")
 		auth.Use(PerIPRateLimitMiddleware(cfg.RateLimitIngest))
-		auth.POST("/register", registerHandler(cfg.AuthStore, cfg.AuthConfig))
+		if !cfg.SingleUserApp {
+			auth.POST("/register", registerHandler(cfg.AuthStore, cfg.AuthConfig))
+		}
 		auth.POST("/login", loginHandler(cfg.AuthStore, cfg.AuthConfig))
 		auth.POST("/logout", requireAuth(cfg.AuthStore), logoutHandler(cfg.AuthStore, cfg.AuthConfig))
 		auth.GET("/me", requireAuth(cfg.AuthStore), meHandler())
 	}
 
 	return router
+}
+
+func portfolioOwnershipChecker(r PortfolioReadStore) PortfolioOwnershipChecker {
+	if r == nil {
+		return nil
+	}
+	c, ok := r.(PortfolioOwnershipChecker)
+	if !ok {
+		return nil
+	}
+	return c
 }
 
 func requestLoggingMiddleware(logger *zap.Logger) gin.HandlerFunc {

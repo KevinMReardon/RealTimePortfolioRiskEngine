@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/api"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
@@ -61,6 +63,138 @@ func run() error {
 	}
 
 	ingestSvc := ingestion.NewService(repo)
+
+	alpacaSyncStore := alpaca.NewSyncStateStore(dbPool)
+
+	bootCtx := context.Background()
+	targets, err := repo.ListAlpacaSyncTargets(bootCtx)
+	if err != nil {
+		logger.Warn("alpaca_sync_targets_boot_load_failed", zap.Error(err))
+	} else {
+		for _, target := range targets {
+			mode := strings.ToLower(strings.TrimSpace(target.AlpacaAccountMode))
+			if mode == "" {
+				mode = "paper"
+			}
+			rest, err := alpaca.NewREST(alpaca.RESTConfig{
+				KeyID:     target.AlpacaKeyID,
+				SecretKey: target.AlpacaSecretKey,
+				BaseURL:   target.AlpacaBaseURL,
+			})
+			if err != nil {
+				logger.Warn("alpaca_rest_init_failed",
+					zap.String("portfolio_id", target.PortfolioID.String()),
+					zap.String("mode", mode),
+					zap.Error(err))
+				continue
+			}
+			acct, err := rest.GetAccount(bootCtx)
+			if err != nil {
+				logger.Warn("alpaca_get_account_failed",
+					zap.String("mode", mode),
+					zap.String("portfolio_id", target.PortfolioID.String()),
+					zap.Error(err))
+				continue
+			}
+			if id := strings.TrimSpace(acct.ID); id != "" {
+				if err := repo.SetPortfolioAlpacaAccountID(bootCtx, target.PortfolioID, id); err != nil {
+					logger.Warn("alpaca_account_link_failed",
+						zap.String("portfolio_id", target.PortfolioID.String()),
+						zap.String("mode", mode),
+						zap.Error(err))
+				} else {
+					logger.Info("alpaca_account_linked",
+						zap.String("portfolio_id", target.PortfolioID.String()),
+						zap.String("alpaca_account_mode", mode),
+						zap.String("alpaca_account_id", id))
+				}
+			}
+		}
+	}
+
+	var defaultAlpacaREST alpaca.REST
+	if cfg.AlpacaImportJobsEnabled() {
+		defaultMode := "paper"
+		keyID := cfg.AlpacaPaperKeyID
+		secret := cfg.AlpacaPaperSecretKey
+		base := cfg.AlpacaPaperBaseURL
+		if strings.TrimSpace(keyID) == "" || strings.TrimSpace(secret) == "" {
+			defaultMode = "live"
+			keyID = cfg.AlpacaLiveKeyID
+			secret = cfg.AlpacaLiveSecretKey
+			base = cfg.AlpacaLiveBaseURL
+		}
+		if strings.TrimSpace(keyID) != "" && strings.TrimSpace(secret) != "" {
+			r, err := alpaca.NewREST(alpaca.RESTConfig{KeyID: keyID, SecretKey: secret, BaseURL: base})
+			if err != nil {
+				logger.Warn("alpaca_import_rest_init_failed", zap.String("mode", defaultMode), zap.Error(err))
+			} else {
+				defaultAlpacaREST = r
+			}
+		}
+	}
+
+	importCtx, importCancel := context.WithCancel(context.Background())
+	defer importCancel()
+	var importWG sync.WaitGroup
+	if cfg.AlpacaImportJobsEnabled() && defaultAlpacaREST != nil {
+		importWG.Add(1)
+		go func() {
+			defer importWG.Done()
+			alpaca.RunImportJobWorker(importCtx, alpaca.ImportJobWorkerConfig{
+				Jobs:       repo,
+				Ingest:     ingestSvc,
+				REST:       defaultAlpacaREST,
+				Logger:     logger,
+				PollEvery:  cfg.AlpacaImportJobPollInterval,
+				JobTimeout: cfg.AlpacaImportJobTimeout,
+			})
+		}()
+		logger.Info("alpaca_import_worker_spawned",
+			zap.Duration("poll_every", cfg.AlpacaImportJobPollInterval),
+			zap.Duration("job_timeout", cfg.AlpacaImportJobTimeout),
+		)
+	}
+
+	alpacaCtx, alpacaCancel := context.WithCancel(context.Background())
+	defer alpacaCancel()
+	var alpacaWG sync.WaitGroup
+	if cfg.AlpacaWorkerEnabled() {
+		alpacaWG.Add(1)
+		go func() {
+			defer alpacaWG.Done()
+			alpaca.RunSyncWorkers(alpacaCtx, alpaca.SyncWorkersConfig{
+				Store:                 alpacaSyncStore,
+				IngestSvc:             ingestSvc,
+				Logger:                logger,
+				Interval:              cfg.AlpacaSyncInterval,
+				HistoryLookback:       cfg.AlpacaSyncHistoryLookback,
+				PriceStreamPartitions: cfg.PriceStreamPartitions,
+				ListTargets: func(ctx context.Context) ([]alpaca.SyncTarget, error) {
+					rows, err := repo.ListAlpacaSyncTargets(ctx)
+					if err != nil {
+						return nil, err
+					}
+					out := make([]alpaca.SyncTarget, 0, len(rows))
+					for _, row := range rows {
+						out = append(out, alpaca.SyncTarget{
+							PortfolioID:       row.PortfolioID,
+							AlpacaAccountMode: row.AlpacaAccountMode,
+							KeyID:             row.AlpacaKeyID,
+							SecretKey:         row.AlpacaSecretKey,
+							BaseURL:           row.AlpacaBaseURL,
+						})
+					}
+					return out, nil
+				},
+			})
+		}()
+		logger.Info("alpaca_sync_worker_spawned",
+			zap.Duration("interval", cfg.AlpacaSyncInterval),
+			zap.Duration("history_lookback", cfg.AlpacaSyncHistoryLookback),
+		)
+	}
+
 	var feedWG sync.WaitGroup
 	feedCtx, feedCancel := context.WithCancel(context.Background())
 	defer feedCancel()
@@ -132,6 +266,8 @@ func run() error {
 		)
 	}
 
+	alpacaImportAPIEnabled := cfg.AlpacaImportJobsEnabled() && defaultAlpacaREST != nil
+
 	router := api.NewRouter(api.RouterConfig{
 		Logger:                logger,
 		Ingest:                ingestSvc,
@@ -149,6 +285,7 @@ func run() error {
 			CookieSecure: cfg.AuthCookieSecure,
 			SessionTTL:   cfg.AuthSessionTTL,
 		},
+		SingleUserApp:             cfg.SingleUserApp,
 		PriceMarksRead:            repo,
 		PriceFeedRuntime:          priceFeedRuntime,
 		PriceFeedEnabled:          cfg.PriceFeedEnabled,
@@ -156,6 +293,11 @@ func run() error {
 		PriceFeedPollInterval:     cfg.PriceFeedPollInterval,
 		PriceFeedWatchlistManager: priceFeedRunner,
 		PriceFeedWatchlistStore:   repo,
+		AlpacaImportJobs:          repo,
+		AlpacaImportEnabled:       alpacaImportAPIEnabled,
+		AlpacaREST:                defaultAlpacaREST,
+		AlpacaSyncStore:           alpacaSyncStore,
+		AlpacaConfigured:          defaultAlpacaREST != nil,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -187,6 +329,36 @@ func run() error {
 	if err := stopWorkers(shutdownCtx); err != nil {
 		return err
 	}
+	importCancel()
+	importStopped := make(chan struct{})
+	go func() {
+		defer close(importStopped)
+		importWG.Wait()
+	}()
+	select {
+	case <-importStopped:
+	case <-shutdownCtx.Done():
+		return shutdownCtx.Err()
+	}
+	if cfg.AlpacaImportJobsEnabled() {
+		logger.Info("alpaca_import_worker_stopped")
+	}
+
+	alpacaCancel()
+	alpacaStopped := make(chan struct{})
+	go func() {
+		defer close(alpacaStopped)
+		alpacaWG.Wait()
+	}()
+	select {
+	case <-alpacaStopped:
+	case <-shutdownCtx.Done():
+		return shutdownCtx.Err()
+	}
+	if cfg.AlpacaWorkerEnabled() {
+		logger.Info("alpaca_sync_stopped")
+	}
+
 	feedCancel()
 	feedStopped := make(chan struct{})
 	go func() {

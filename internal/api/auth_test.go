@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 )
@@ -85,7 +86,7 @@ func (f *fakeAuthStore) RevokeSession(ctx context.Context, sessionID uuid.UUID) 
 	return nil
 }
 
-func TestAuth_RegisterLoginMeLogout(t *testing.T) {
+func TestAuth_LoginMeLogout(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	store := newFakeAuthStore()
@@ -98,14 +99,13 @@ func TestAuth_RegisterLoginMeLogout(t *testing.T) {
 		AuthConfig:            AuthConfig{CookieSecure: false, SessionTTL: time.Hour},
 	})
 
-	regBody := []byte(`{"display_name":"Alex","work_email":"alex@company.com","password":"superpass123"}`)
-	regReq := httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewReader(regBody))
-	regReq.Header.Set("Content-Type", "application/json")
-	regRec := httptest.NewRecorder()
-	r.ServeHTTP(regRec, regReq)
-	if regRec.Code != http.StatusCreated {
-		t.Fatalf("register status=%d body=%s", regRec.Code, regRec.Body.String())
-	}
+	hash, _ := bcrypt.GenerateFromPassword([]byte("superpass123"), bcrypt.DefaultCost)
+	_, _ = store.CreateUser(context.Background(), events.UserAccount{
+		UserID:       uuid.New(),
+		DisplayName:  "Alex",
+		WorkEmail:    "alex@company.com",
+		PasswordHash: string(hash),
+	})
 
 	loginBody := []byte(`{"work_email":"alex@company.com","password":"superpass123"}`)
 	loginReq := httptest.NewRequest(http.MethodPost, "/v1/auth/login", bytes.NewReader(loginBody))

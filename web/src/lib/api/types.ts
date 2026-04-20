@@ -48,6 +48,11 @@ export type PortfolioCatalogEntry = {
   base_currency: string;
   created_at: string;
   updated_at: string;
+  /** Alpaca brokerage account id (GET /v2/account) once the API server has linked this book */
+  alpaca_account_id?: string | null;
+  alpaca_account_mode: "paper" | "live";
+  alpaca_sync_enabled: boolean;
+  alpaca_linked: boolean;
 };
 
 export type ListPortfoliosResponse = {
@@ -57,6 +62,13 @@ export type ListPortfoliosResponse = {
 export type CreatePortfolioRequest = {
   name: string;
   base_currency?: string;
+  alpaca?: {
+    account_mode?: "paper" | "live";
+    sync_enabled?: boolean;
+    key_id: string;
+    secret_key: string;
+    base_url?: string;
+  };
 };
 
 export type RiskAssumptions = Record<string, unknown>;
@@ -254,4 +266,48 @@ export type PriceFeedWatchlistResponse = {
 
 export type UpdatePriceFeedWatchlistRequest = {
   watchlist: string[];
+};
+
+/** GET /v1/portfolios/:id/alpaca/status */
+export type AlpacaPublicAccount = {
+  id?: string;
+  status: string;
+  currency?: string;
+  pattern_day_trader: boolean;
+  trading_blocked: boolean;
+  account_blocked: boolean;
+  created_at?: string;
+};
+
+export type AlpacaSyncSnapshot = {
+  last_success_at?: string;
+  last_error?: string;
+  updated_at?: string;
+};
+
+export type AlpacaStatusResponse = {
+  configured: boolean;
+  last_sync_at?: string;
+  last_error?: string;
+  sync_state_updated_at?: string;
+  sync?: AlpacaSyncSnapshot;
+  account?: AlpacaPublicAccount;
+  account_error?: string;
+  broker_unreachable?: boolean;
+};
+
+export type AlpacaQtyMismatch = {
+  symbol: string;
+  internal_quantity: string;
+  broker_quantity: string;
+};
+
+export type AlpacaReconciliationResponse = {
+  configured: boolean;
+  mismatches: AlpacaQtyMismatch[];
+  internal_only_symbols: string[];
+  broker_only_symbols: string[];
+  aggregate_hash: string;
+  broker_error?: string;
+  broker_unreachable?: boolean;
 };

@@ -30,10 +30,31 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
+func catalogAlpacaPtr(ns sql.NullString) *string {
+	if !ns.Valid {
+		return nil
+	}
+	s := ns.String
+	return &s
+}
+
+func hasAlpacaCreds(keyID, secret sql.NullString) bool {
+	return keyID.Valid && strings.TrimSpace(keyID.String) != "" &&
+		secret.Valid && strings.TrimSpace(secret.String) != ""
+}
+
+func normalizeAlpacaMode(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "live" {
+		return "live"
+	}
+	return "paper"
+}
+
 // ListPortfolios returns catalog rows ordered by newest create first.
 func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_id, alpaca_account_mode, alpaca_sync_enabled, alpaca_key_id, alpaca_secret_key
 		FROM portfolios
 		ORDER BY created_at DESC, portfolio_id ASC
 	`)
@@ -45,9 +66,15 @@ func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogE
 	out := make([]PortfolioCatalogEntry, 0)
 	for rows.Next() {
 		var e PortfolioCatalogEntry
-		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		var alpaca sql.NullString
+		var mode string
+		var keyID, secret sql.NullString
+		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt, &alpaca, &mode, &e.AlpacaSyncEnabled, &keyID, &secret); err != nil {
 			return nil, fmt.Errorf("scan portfolio catalog row: %w", err)
 		}
+		e.AlpacaAccountID = catalogAlpacaPtr(alpaca)
+		e.AlpacaAccountMode = normalizeAlpacaMode(mode)
+		e.AlpacaLinked = hasAlpacaCreds(keyID, secret)
 		e.CreatedAt = e.CreatedAt.UTC()
 		e.UpdatedAt = e.UpdatedAt.UTC()
 		out = append(out, e)
@@ -57,7 +84,7 @@ func (s *PostgresStore) ListPortfolios(ctx context.Context) ([]PortfolioCatalogE
 
 func (s *PostgresStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]PortfolioCatalogEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+		SELECT portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_id, alpaca_account_mode, alpaca_sync_enabled, alpaca_key_id, alpaca_secret_key
 		FROM portfolios
 		WHERE owner_user_id = $1
 		ORDER BY created_at DESC, portfolio_id ASC
@@ -70,9 +97,15 @@ func (s *PostgresStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID u
 	out := make([]PortfolioCatalogEntry, 0)
 	for rows.Next() {
 		var e PortfolioCatalogEntry
-		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		var alpaca sql.NullString
+		var mode string
+		var keyID, secret sql.NullString
+		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID, &e.Name, &e.BaseCurrency, &e.CreatedAt, &e.UpdatedAt, &alpaca, &mode, &e.AlpacaSyncEnabled, &keyID, &secret); err != nil {
 			return nil, fmt.Errorf("scan owner portfolio row: %w", err)
 		}
+		e.AlpacaAccountID = catalogAlpacaPtr(alpaca)
+		e.AlpacaAccountMode = normalizeAlpacaMode(mode)
+		e.AlpacaLinked = hasAlpacaCreds(keyID, secret)
 		e.CreatedAt = e.CreatedAt.UTC()
 		e.UpdatedAt = e.UpdatedAt.UTC()
 		out = append(out, e)
@@ -83,10 +116,11 @@ func (s *PostgresStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID u
 // CreatePortfolio inserts one catalog row and returns the stored values.
 func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
 	var out PortfolioCatalogEntry
+	var alpacaInsert sql.NullString
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at)
-		VALUES ($1, NULL, $2, $3, NOW(), NOW())
-		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_mode, alpaca_sync_enabled)
+		VALUES ($1, NULL, $2, $3, NOW(), NOW(), 'paper', true)
+		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_id, alpaca_account_mode, alpaca_sync_enabled
 	`, portfolioID, name, baseCurrency).Scan(
 		&out.PortfolioID,
 		&out.OwnerUserID,
@@ -94,10 +128,16 @@ func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UU
 		&out.BaseCurrency,
 		&out.CreatedAt,
 		&out.UpdatedAt,
+		&alpacaInsert,
+		&out.AlpacaAccountMode,
+		&out.AlpacaSyncEnabled,
 	)
 	if err != nil {
 		return PortfolioCatalogEntry{}, fmt.Errorf("create portfolio catalog row: %w", err)
 	}
+	out.AlpacaAccountID = catalogAlpacaPtr(alpacaInsert)
+	out.AlpacaAccountMode = normalizeAlpacaMode(out.AlpacaAccountMode)
+	out.AlpacaLinked = false
 	out.CreatedAt = out.CreatedAt.UTC()
 	out.UpdatedAt = out.UpdatedAt.UTC()
 	return out, nil
@@ -105,10 +145,11 @@ func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UU
 
 func (s *PostgresStore) CreatePortfolioForOwner(ctx context.Context, ownerUserID, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
 	var out PortfolioCatalogEntry
+	var alpacaOwnerInsert sql.NullString
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at
+		INSERT INTO portfolios (portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_mode, alpaca_sync_enabled)
+		VALUES ($1, $2, $3, $4, NOW(), NOW(), 'paper', true)
+		RETURNING portfolio_id, owner_user_id, name, base_currency, created_at, updated_at, alpaca_account_id, alpaca_account_mode, alpaca_sync_enabled
 	`, portfolioID, ownerUserID, name, baseCurrency).Scan(
 		&out.PortfolioID,
 		&out.OwnerUserID,
@@ -116,13 +157,96 @@ func (s *PostgresStore) CreatePortfolioForOwner(ctx context.Context, ownerUserID
 		&out.BaseCurrency,
 		&out.CreatedAt,
 		&out.UpdatedAt,
+		&alpacaOwnerInsert,
+		&out.AlpacaAccountMode,
+		&out.AlpacaSyncEnabled,
 	)
 	if err != nil {
 		return PortfolioCatalogEntry{}, fmt.Errorf("create owner portfolio row: %w", err)
 	}
+	out.AlpacaAccountID = catalogAlpacaPtr(alpacaOwnerInsert)
+	out.AlpacaAccountMode = normalizeAlpacaMode(out.AlpacaAccountMode)
+	out.AlpacaLinked = false
 	out.CreatedAt = out.CreatedAt.UTC()
 	out.UpdatedAt = out.UpdatedAt.UTC()
 	return out, nil
+}
+
+// ListAlpacaSyncTargets returns portfolios configured for Alpaca fill polling.
+func (s *PostgresStore) ListAlpacaSyncTargets(ctx context.Context) ([]AlpacaSyncTarget, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT portfolio_id, alpaca_account_mode, alpaca_account_id, alpaca_sync_enabled, alpaca_key_id, alpaca_secret_key, alpaca_base_url
+		FROM portfolios
+		WHERE alpaca_sync_enabled = true
+		  AND COALESCE(NULLIF(TRIM(alpaca_key_id), ''), '') <> ''
+		  AND COALESCE(NULLIF(TRIM(alpaca_secret_key), ''), '') <> ''
+		ORDER BY created_at ASC, portfolio_id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list alpaca sync targets: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]AlpacaSyncTarget, 0)
+	for rows.Next() {
+		var row AlpacaSyncTarget
+		var aid, keyID, secret, baseURL sql.NullString
+		if err := rows.Scan(&row.PortfolioID, &row.AlpacaAccountMode, &aid, &row.AlpacaSyncEnabled, &keyID, &secret, &baseURL); err != nil {
+			return nil, fmt.Errorf("scan alpaca sync target: %w", err)
+		}
+		row.AlpacaAccountMode = normalizeAlpacaMode(row.AlpacaAccountMode)
+		row.AlpacaAccountID = catalogAlpacaPtr(aid)
+		row.AlpacaKeyID = strings.TrimSpace(keyID.String)
+		row.AlpacaSecretKey = strings.TrimSpace(secret.String)
+		row.AlpacaBaseURL = strings.TrimSpace(baseURL.String)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpsertPortfolioAlpacaLink(ctx context.Context, portfolioID uuid.UUID, link AlpacaPortfolioLinkInput) error {
+	mode := normalizeAlpacaMode(link.AlpacaAccountMode)
+	keyID := strings.TrimSpace(link.AlpacaKeyID)
+	secret := strings.TrimSpace(link.AlpacaSecretKey)
+	baseURL := strings.TrimSpace(link.AlpacaBaseURL)
+	if keyID == "" || secret == "" {
+		return fmt.Errorf("alpaca credentials are required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE portfolios
+		SET alpaca_account_mode = $2,
+		    alpaca_sync_enabled = $3,
+		    alpaca_key_id = $4,
+		    alpaca_secret_key = $5,
+		    alpaca_base_url = NULLIF($6, ''),
+		    updated_at = NOW()
+		WHERE portfolio_id = $1
+	`, portfolioID, mode, link.AlpacaSyncEnabled, keyID, secret, baseURL)
+	if err != nil {
+		return fmt.Errorf("upsert portfolio alpaca link: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("portfolio not found for alpaca link")
+	}
+	return nil
+}
+
+// SetPortfolioAlpacaAccountID records the Alpaca brokerage account id (GET /v2/account) for this catalog row.
+func (s *PostgresStore) SetPortfolioAlpacaAccountID(ctx context.Context, portfolioID uuid.UUID, alpacaAccountID string) error {
+	id := strings.TrimSpace(alpacaAccountID)
+	if id == "" {
+		return fmt.Errorf("empty alpaca account id")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE portfolios SET alpaca_account_id = $2, updated_at = NOW() WHERE portfolio_id = $1
+	`, portfolioID, id)
+	if err != nil {
+		return fmt.Errorf("set portfolio alpaca_account_id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("portfolio not found for alpaca link")
+	}
+	return nil
 }
 
 func (s *PostgresStore) PortfolioOwnedByUser(ctx context.Context, portfolioID, ownerUserID uuid.UUID) (bool, error) {

@@ -18,6 +18,7 @@ test-integration:
 
 build:
 	go build ./cmd/server
+	go build ./cmd/alpaca-backfill
 
 migrate-up:
 	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)

@@ -41,8 +41,13 @@ export function RegisterForm() {
       if (!registerRes.ok) {
         const body = (await registerRes.json().catch(() => null)) as null | {
           message?: string;
+          error?: string;
         };
-        throw new Error(body?.message ?? "Registration failed");
+        throw new Error(
+          body?.message ??
+            body?.error ??
+            "Registration failed (it may be disabled in single-user mode)",
+        );
       }
       const loginRes = await fetch("/api/backend/v1/auth/login", {
         method: "POST",
@@ -74,15 +79,30 @@ export function RegisterForm() {
       ) : null}
       <div className="space-y-2">
         <Label htmlFor="display_name">Display name</Label>
-        <Input id="display_name" placeholder="Alex Chen" {...form.register("display_name")} />
+        <Input
+          id="display_name"
+          placeholder="Alex Chen"
+          {...form.register("display_name")}
+        />
       </div>
       <div className="space-y-2">
         <Label htmlFor="work_email">Work email</Label>
-        <Input id="work_email" autoComplete="email" placeholder="you@company.com" {...form.register("work_email")} />
+        <Input
+          id="work_email"
+          autoComplete="email"
+          placeholder="you@company.com"
+          {...form.register("work_email")}
+        />
       </div>
       <div className="space-y-2">
         <Label htmlFor="password">Password</Label>
-        <Input id="password" type="password" autoComplete="new-password" placeholder="••••••••" {...form.register("password")} />
+        <Input
+          id="password"
+          type="password"
+          autoComplete="new-password"
+          placeholder="••••••••"
+          {...form.register("password")}
+        />
       </div>
       <Button className="w-full" type="submit" disabled={pending}>
         {pending ? "Creating account…" : "Create account"}
@@ -90,4 +110,3 @@ export function RegisterForm() {
     </form>
   );
 }
-

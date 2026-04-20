@@ -43,36 +43,47 @@ export function DashboardHome() {
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <p className="text-sm text-muted-foreground">
-            A calm, high-signal snapshot of exposure and risk for the selected portfolio.
+            A calm, high-signal snapshot of exposure and risk for your book (single-portfolio workspace).
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:items-end">
-          <div className="text-xs text-muted-foreground">Active portfolio</div>
-          <Select
-            value={selected ?? undefined}
-            onValueChange={(v) => {
-              const url = new URL(window.location.href);
-              url.searchParams.set("portfolio", v);
-              router.push(`${url.pathname}?${url.searchParams.toString()}`);
-            }}
-            disabled={!saved.length || portfoliosQ.isLoading}
-          >
-            <SelectTrigger className="w-[min(92vw,380px)]">
-              <SelectValue placeholder={saved.length ? "Select…" : "Create a portfolio first"} />
-            </SelectTrigger>
-            <SelectContent>
-              {saved.map((p) => (
-                <SelectItem key={p.portfolio_id} value={p.portfolio_id}>
-                  <span className="font-medium">{p.name}</span>
-                  <span className="ml-2 font-mono text-xs text-muted-foreground">
-                    {p.portfolio_id.slice(0, 8)}…
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="text-xs text-muted-foreground">
+            {saved.length > 1 ? "Active portfolio" : "Your portfolio"}
+          </div>
+          {saved.length > 1 ? (
+            <Select
+              value={selected ?? undefined}
+              onValueChange={(v) => {
+                const url = new URL(window.location.href);
+                url.searchParams.set("portfolio", v);
+                router.push(`${url.pathname}?${url.searchParams.toString()}`);
+              }}
+              disabled={portfoliosQ.isLoading}
+            >
+              <SelectTrigger className="w-[min(92vw,380px)]">
+                <SelectValue placeholder="Select…" />
+              </SelectTrigger>
+              <SelectContent>
+                {saved.map((p) => (
+                  <SelectItem key={p.portfolio_id} value={p.portfolio_id}>
+                    <span className="font-medium">{p.name}</span>
+                    <span className="ml-2 font-mono text-xs text-muted-foreground">
+                      {p.portfolio_id.slice(0, 8)}…
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : saved.length === 1 ? (
+            <div className="w-[min(92vw,380px)] rounded-md border bg-muted/30 px-3 py-2 text-left text-sm">
+              <div className="font-medium">{saved[0].name}</div>
+              <div className="break-all font-mono text-[11px] text-muted-foreground">
+                {saved[0].portfolio_id}
+              </div>
+            </div>
+          ) : null}
           <Button asChild variant="outline" size="sm">
-            <Link href="/portfolios">Manage portfolios</Link>
+            <Link href="/portfolios">Portfolio settings</Link>
           </Button>
         </div>
       </div>

@@ -32,6 +32,13 @@ const (
 	defaultPriceFeedMaxQuoteAgeMS = 30 * 60 * 1000 // 30m
 	defaultPriceFeedDedupWindowMS = 60 * 1000      // 60s
 	defaultAuthSessionTTLSec      = 14 * 24 * 60 * 60
+	defaultAlpacaBaseURL          = "https://paper-api.alpaca.markets"
+	defaultAlpacaSyncIntervalSec  = 90
+	defaultAlpacaSyncHistoryDays  = 365
+	defaultAlpacaImportPollSec    = 2
+	defaultAlpacaImportTimeoutSec = 7200
+	defaultAlpacaDataBaseURL      = "https://data.alpaca.markets"
+	defaultPriceFeedAlpacaRPM     = 200
 )
 
 type Config struct {
@@ -106,7 +113,7 @@ type Config struct {
 	// Env: PRICE_FEED_ENABLED.
 	PriceFeedEnabled bool
 	// PriceFeedProvider selects the active provider adapter.
-	// Env: PRICE_FEED_PROVIDER (currently only "twelvedata" is supported).
+	// Env: PRICE_FEED_PROVIDER — "twelvedata" (default) or "alpaca" (Market Data REST polling).
 	PriceFeedProvider string
 	// PriceFeedPollInterval is provider fetch cadence.
 	// Env: PRICE_FEED_POLL_SECONDS.
@@ -134,12 +141,52 @@ type Config struct {
 	// Env: PRICE_FEED_TWELVEDATA_API_KEY, PRICE_FEED_TWELVEDATA_RATE_LIMIT_RPM.
 	PriceFeedTwelveDataAPIKey       string
 	PriceFeedTwelveDataRateLimitRPM int
+	// PriceFeedAlpacaRateLimitRPM caps assumed requests-per-minute when PRICE_FEED_PROVIDER=alpaca
+	// (one HTTP call per equity symbol per poll + batched crypto). Env: PRICE_FEED_ALPACA_RATE_LIMIT_RPM.
+	PriceFeedAlpacaRateLimitRPM int
 	// AuthSessionTTL controls backend session expiry.
 	// Env: AUTH_SESSION_TTL_SECONDS.
 	AuthSessionTTL time.Duration
 	// AuthCookieSecure toggles Secure flag on auth cookie.
 	// Env: AUTH_COOKIE_SECURE.
 	AuthCookieSecure bool
+	// SingleUserApp allows at most one catalog portfolio per signed-in user (and one catalog row without auth).
+	// Env: SINGLE_USER_APP (default true).
+	SingleUserApp bool
+
+	// Alpaca Trading API credentials by mode.
+	// Env:
+	//   ALPACA_PAPER_KEY_ID / ALPACA_PAPER_SECRET_KEY / ALPACA_PAPER_BASE_URL
+	//   ALPACA_LIVE_KEY_ID  / ALPACA_LIVE_SECRET_KEY  / ALPACA_LIVE_BASE_URL
+	// Backward-compatible fallback:
+	//   ALPACA_KEY_ID / ALPACA_SECRET_KEY / ALPACA_BASE_URL (treated as paper when mode vars are unset)
+	AlpacaPaperKeyID     string
+	AlpacaPaperSecretKey string
+	AlpacaPaperBaseURL   string
+	AlpacaLiveKeyID      string
+	AlpacaLiveSecretKey  string
+	AlpacaLiveBaseURL    string
+	// AlpacaSyncDisabled is true when ALPACA_SYNC_ENABLED is explicitly false (0/false/no/off).
+	// When unset, sync uses "auto": the fill sync worker runs when keys are set and a target portfolio exists
+	// (explicit env or single-user resolve).
+	// Env: ALPACA_SYNC_ENABLED (optional; set false to keep keys for import/backfill but disable polling sync).
+	AlpacaSyncDisabled bool
+	// AlpacaDataBaseURL is the Market Data REST API origin (distinct from trading REST and from the WS stream).
+	// Defaults to https://data.alpaca.markets when ALPACA_DATA_BASE_URL is unset (used by PRICE_FEED_PROVIDER=alpaca).
+	// Env: ALPACA_DATA_BASE_URL.
+	AlpacaDataBaseURL string
+	// AlpacaSyncInterval governs REST polling for new fills.
+	// Env: ALPACA_SYNC_INTERVAL_SECONDS (default 90).
+	AlpacaSyncInterval time.Duration
+	// AlpacaSyncHistoryLookback seeds the first activities request when no stored watermark exists.
+	// Env: ALPACA_SYNC_HISTORY_DAYS (default 365).
+	AlpacaSyncHistoryLookback time.Duration
+	// AlpacaImportJobPollInterval is how often the import worker tries to claim a queued job.
+	// Env: ALPACA_IMPORT_JOB_POLL_SECONDS (default 2).
+	AlpacaImportJobPollInterval time.Duration
+	// AlpacaImportJobTimeout caps one BackfillFills run per job.
+	// Env: ALPACA_IMPORT_JOB_TIMEOUT_SECONDS (default 7200).
+	AlpacaImportJobTimeout time.Duration
 }
 
 func Load() (Config, error) {
@@ -218,7 +265,12 @@ func Load() (Config, error) {
 	openAIBase := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	openAIModel := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
 	feedProvider := strings.ToLower(strings.TrimSpace(getEnv("PRICE_FEED_PROVIDER", defaultPriceFeedProvider)))
-	if feedProvider == "" || feedProvider != defaultPriceFeedProvider {
+	if feedProvider == "" {
+		feedProvider = defaultPriceFeedProvider
+	}
+	switch feedProvider {
+	case "twelvedata", "alpaca":
+	default:
 		feedProvider = defaultPriceFeedProvider
 	}
 	feedPollSeconds := getEnvInt("PRICE_FEED_POLL_SECONDS", defaultPriceFeedPollSeconds)
@@ -249,12 +301,66 @@ func Load() (Config, error) {
 	if twelveDataRPM < 1 {
 		twelveDataRPM = 8
 	}
+	alpacaFeedRPM := getEnvInt("PRICE_FEED_ALPACA_RATE_LIMIT_RPM", defaultPriceFeedAlpacaRPM)
+	if alpacaFeedRPM < 1 {
+		alpacaFeedRPM = defaultPriceFeedAlpacaRPM
+	}
 	authTTLSec := getEnvInt("AUTH_SESSION_TTL_SECONDS", defaultAuthSessionTTLSec)
 	if authTTLSec < 300 {
 		authTTLSec = defaultAuthSessionTTLSec
 	}
 	feedSymbols := parseCSVSymbols(os.Getenv("PRICE_FEED_SYMBOLS"))
-	feedPollSeconds = applyTwelveDataRateLimitSafety(feedPollSeconds, len(feedSymbols), twelveDataRPM)
+	switch feedProvider {
+	case "alpaca":
+		feedPollSeconds = applyTwelveDataRateLimitSafety(feedPollSeconds, len(feedSymbols), alpacaFeedRPM)
+	default:
+		feedPollSeconds = applyTwelveDataRateLimitSafety(feedPollSeconds, len(feedSymbols), twelveDataRPM)
+	}
+
+	legacyAlpacaBase := strings.TrimSpace(os.Getenv("ALPACA_BASE_URL"))
+	if legacyAlpacaBase == "" {
+		legacyAlpacaBase = defaultAlpacaBaseURL
+	}
+	paperBase := strings.TrimSpace(os.Getenv("ALPACA_PAPER_BASE_URL"))
+	if paperBase == "" {
+		paperBase = legacyAlpacaBase
+	}
+	liveBase := strings.TrimSpace(os.Getenv("ALPACA_LIVE_BASE_URL"))
+	if liveBase == "" {
+		liveBase = "https://api.alpaca.markets"
+	}
+	paperKeyID := strings.TrimSpace(os.Getenv("ALPACA_PAPER_KEY_ID"))
+	paperSecret := strings.TrimSpace(os.Getenv("ALPACA_PAPER_SECRET_KEY"))
+	if paperKeyID == "" && paperSecret == "" {
+		paperKeyID = strings.TrimSpace(os.Getenv("ALPACA_KEY_ID"))
+		paperSecret = strings.TrimSpace(os.Getenv("ALPACA_SECRET_KEY"))
+	}
+	liveKeyID := strings.TrimSpace(os.Getenv("ALPACA_LIVE_KEY_ID"))
+	liveSecret := strings.TrimSpace(os.Getenv("ALPACA_LIVE_SECRET_KEY"))
+	alpacaSyncSec := getEnvInt("ALPACA_SYNC_INTERVAL_SECONDS", defaultAlpacaSyncIntervalSec)
+	if alpacaSyncSec < 30 {
+		alpacaSyncSec = 30
+	}
+	if alpacaSyncSec > 86400 {
+		alpacaSyncSec = 86400
+	}
+	alpacaHistDays := getEnvInt("ALPACA_SYNC_HISTORY_DAYS", defaultAlpacaSyncHistoryDays)
+	if alpacaHistDays < 1 {
+		alpacaHistDays = defaultAlpacaSyncHistoryDays
+	}
+	alpacaSyncDisabled := !getEnvBool("ALPACA_SYNC_ENABLED", true)
+	alpacaDataBaseURL := strings.TrimSpace(os.Getenv("ALPACA_DATA_BASE_URL"))
+	if alpacaDataBaseURL == "" {
+		alpacaDataBaseURL = defaultAlpacaDataBaseURL
+	}
+	alpacaImportPollSec := getEnvInt("ALPACA_IMPORT_JOB_POLL_SECONDS", defaultAlpacaImportPollSec)
+	if alpacaImportPollSec < 1 {
+		alpacaImportPollSec = 1
+	}
+	alpacaImportTimeoutSec := getEnvInt("ALPACA_IMPORT_JOB_TIMEOUT_SECONDS", defaultAlpacaImportTimeoutSec)
+	if alpacaImportTimeoutSec < 60 {
+		alpacaImportTimeoutSec = 60
+	}
 
 	cfg := Config{
 		Port:                            getEnv("PORT", defaultPort),
@@ -295,8 +401,23 @@ func Load() (Config, error) {
 		PriceFeedDedupWindow:            time.Duration(dedupWindowMS) * time.Millisecond,
 		PriceFeedTwelveDataAPIKey:       strings.TrimSpace(os.Getenv("PRICE_FEED_TWELVEDATA_API_KEY")),
 		PriceFeedTwelveDataRateLimitRPM: twelveDataRPM,
+		PriceFeedAlpacaRateLimitRPM:     alpacaFeedRPM,
 		AuthSessionTTL:                  time.Duration(authTTLSec) * time.Second,
 		AuthCookieSecure:                getEnvBool("AUTH_COOKIE_SECURE", false),
+		SingleUserApp:                   getEnvBool("SINGLE_USER_APP", true),
+
+		AlpacaPaperKeyID:            paperKeyID,
+		AlpacaPaperSecretKey:        paperSecret,
+		AlpacaPaperBaseURL:          paperBase,
+		AlpacaLiveKeyID:             liveKeyID,
+		AlpacaLiveSecretKey:         liveSecret,
+		AlpacaLiveBaseURL:           liveBase,
+		AlpacaSyncDisabled:          alpacaSyncDisabled,
+		AlpacaDataBaseURL:           alpacaDataBaseURL,
+		AlpacaSyncInterval:          time.Duration(alpacaSyncSec) * time.Second,
+		AlpacaSyncHistoryLookback:   time.Duration(alpacaHistDays) * 24 * time.Hour,
+		AlpacaImportJobPollInterval: time.Duration(alpacaImportPollSec) * time.Second,
+		AlpacaImportJobTimeout:      time.Duration(alpacaImportTimeoutSec) * time.Second,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -304,6 +425,22 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// AlpacaWorkerEnabled reports whether any Alpaca mode credentials are configured and sync is enabled.
+// Portfolio-level credentials/selection comes from catalog mapping.
+func (c Config) AlpacaWorkerEnabled() bool {
+	if c.AlpacaSyncDisabled {
+		return false
+	}
+	return true
+}
+
+// AlpacaImportJobsEnabled reports whether Alpaca REST is configured (async import jobs + worker).
+func (c Config) AlpacaImportJobsEnabled() bool {
+	hasPaper := strings.TrimSpace(c.AlpacaPaperKeyID) != "" && strings.TrimSpace(c.AlpacaPaperSecretKey) != ""
+	hasLive := strings.TrimSpace(c.AlpacaLiveKeyID) != "" && strings.TrimSpace(c.AlpacaLiveSecretKey) != ""
+	return hasPaper || hasLive
 }
 
 func getEnv(key, fallback string) string {

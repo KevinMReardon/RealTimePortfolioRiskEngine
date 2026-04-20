@@ -14,6 +14,7 @@ const (
 	ErrCodeInsufficientData         = "INSUFFICIENT_DATA"
 	ErrCodeInternal                 = "INTERNAL_ERROR"
 	ErrCodeNotFound                 = "NOT_FOUND"
+	ErrCodeConflict                 = "CONFLICT"
 	ErrCodeUnauthorized             = "UNAUTHORIZED"
 	ErrCodeForbidden                = "FORBIDDEN"
 	ErrCodeRateLimited              = "RATE_LIMITED"

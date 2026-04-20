@@ -53,6 +53,14 @@ var (
 		Name: "price_feed_rate_limit_hits_total",
 		Help: "Total provider rate-limit (HTTP 429) responses seen by the feed runner.",
 	}, []string{"provider"})
+	alpacaSyncRunsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "alpaca_sync_runs_total",
+		Help: "Alpaca REST fill sync ticker outcomes.",
+	}, []string{"result"})
+	alpacaSyncFillOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "alpaca_sync_fill_outcomes_total",
+		Help: "Per-fill ingestion outcomes during Alpaca sync.",
+	}, []string{"result"})
 )
 
 func ensureMetricsRegistered() {
@@ -68,6 +76,8 @@ func ensureMetricsRegistered() {
 			priceFeedDedupSkippedTotal,
 			priceFeedProviderFailoversTotal,
 			priceFeedRateLimitHitsTotal,
+			alpacaSyncRunsTotal,
+			alpacaSyncFillOutcomesTotal,
 		)
 		projectionLagSeconds.WithLabelValues("trade").Set(0)
 		projectionLagSeconds.WithLabelValues("price").Set(0)
@@ -139,4 +149,22 @@ func IncPriceFeedProviderFailover(fromProvider, toProvider string) {
 func IncPriceFeedRateLimitHit(provider string) {
 	ensureMetricsRegistered()
 	priceFeedRateLimitHitsTotal.WithLabelValues(provider).Inc()
+}
+
+// ObserveAlpacaSyncRun records one sync tick outcome: ok, error_before_fetch, error_during_tick.
+func ObserveAlpacaSyncRun(result string) {
+	ensureMetricsRegistered()
+	if result == "" {
+		result = "unknown"
+	}
+	alpacaSyncRunsTotal.WithLabelValues(result).Inc()
+}
+
+// ObserveAlpacaFillOutcome records how one FILL mapped to ingestion: appended, duplicate, skipped_invalid.
+func ObserveAlpacaFillOutcome(result string) {
+	ensureMetricsRegistered()
+	if result == "" {
+		result = "unknown"
+	}
+	alpacaSyncFillOutcomesTotal.WithLabelValues(result).Inc()
 }

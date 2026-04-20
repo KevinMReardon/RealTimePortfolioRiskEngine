@@ -46,6 +46,33 @@ type PortfolioCatalogEntry struct {
 	BaseCurrency string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// AlpacaAccountID is the brokerage account id from Alpaca GET /v2/account when linked (single-book + keys).
+	AlpacaAccountID *string
+	// AlpacaAccountMode selects which Alpaca account credentials are used for this portfolio ("paper"|"live").
+	AlpacaAccountMode string
+	// AlpacaSyncEnabled gates background fill polling for this portfolio.
+	AlpacaSyncEnabled bool
+	// AlpacaLinked is true when this portfolio has stored Alpaca API credentials.
+	AlpacaLinked bool
+}
+
+// AlpacaSyncTarget describes one portfolio configured for Alpaca fill polling.
+type AlpacaSyncTarget struct {
+	PortfolioID       uuid.UUID
+	AlpacaAccountMode string
+	AlpacaAccountID   *string
+	AlpacaSyncEnabled bool
+	AlpacaKeyID       string
+	AlpacaSecretKey   string
+	AlpacaBaseURL     string
+}
+
+type AlpacaPortfolioLinkInput struct {
+	AlpacaAccountMode string
+	AlpacaSyncEnabled bool
+	AlpacaKeyID       string
+	AlpacaSecretKey   string
+	AlpacaBaseURL     string
 }
 
 type UserAccount struct {

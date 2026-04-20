@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
@@ -69,6 +70,28 @@ func integrationRouter(pool *pgxpool.Pool, log *zap.Logger) *gin.Engine {
 		PriceFeedEnabled:      false,
 		PriceFeedProvider:     "twelvedata",
 		PriceFeedPollInterval: time.Minute,
+	})
+}
+
+func integrationRouterWithAlpaca(pool *pgxpool.Pool, log *zap.Logger, rest alpaca.REST) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	repo := events.NewPostgresStore(pool)
+	svc := ingestion.NewService(repo)
+	syncStore := alpaca.NewSyncStateStore(pool)
+	return NewRouter(RouterConfig{
+		Logger:                log,
+		Ingest:                svc,
+		ReadPortfolio:         repo,
+		RiskRead:              repo,
+		RiskSigmaWindowN:      60,
+		PriceStreamPartitions: integrationPricePartitions(),
+		PriceMarksRead:        repo,
+		PriceFeedEnabled:      false,
+		PriceFeedProvider:     "twelvedata",
+		PriceFeedPollInterval: time.Minute,
+		AlpacaREST:            rest,
+		AlpacaSyncStore:       syncStore,
+		AlpacaConfigured:      rest != nil,
 	})
 }
 
@@ -737,5 +760,89 @@ func TestHTTP_Scenario_pctShockDeterministicRepeat(t *testing.T) {
 	}
 	if first.Base.Totals.MarketValue != second.Base.Totals.MarketValue {
 		t.Fatalf("repeat mismatch base mv %q vs %q", first.Base.Totals.MarketValue, second.Base.Totals.MarketValue)
+	}
+}
+
+func TestHTTP_AlpacaPortfolioStatusAndReconciliation(t *testing.T) {
+	ctx := context.Background()
+	pool := newAPIIntegrationPool(t)
+	pid := uuid.New()
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM positions_projection WHERE portfolio_id = $1`, pid)
+		_, _ = pool.Exec(ctx, `DELETE FROM alpaca_sync_state WHERE portfolio_id = $1`, pid)
+		_, _ = pool.Exec(ctx, `DELETE FROM portfolios WHERE portfolio_id = $1`, pid)
+	})
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO portfolios (portfolio_id, name, base_currency) VALUES ($1, 'alpaca-api-int', 'USD')
+	`, pid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO positions_projection (portfolio_id, symbol, quantity, cost_basis, realized_pnl, updated_at)
+		VALUES ($1, 'AAPL', 5, 400, 0, NOW())
+	`, pid); err != nil {
+		t.Fatal(err)
+	}
+	syncAt := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO alpaca_sync_state (portfolio_id, last_success_at, activities_page_token, activities_after_time, last_error, updated_at)
+		VALUES ($1, $2, NULL, NULL, NULL, NOW())
+	`, pid, syncAt); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &alpaca.FakeREST{
+		Account: alpaca.AccountSummary{
+			ID:        "paper-acc",
+			Status:    "ACTIVE",
+			Currency:  "USD",
+			CreatedAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		Positions: []alpaca.PositionRow{
+			{Symbol: "AAPL", Qty: decimal.RequireFromString("3")},
+			{Symbol: "MSFT", Qty: decimal.RequireFromString("2")},
+		},
+	}
+
+	log := zap.NewNop()
+	router := integrationRouterWithAlpaca(pool, log, fake)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/portfolios/"+pid.String()+"/alpaca/status", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code %d body=%s", rec.Code, rec.Body.String())
+	}
+	var st map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st["configured"] != true {
+		t.Fatalf("configured %+v", st)
+	}
+	syncObj, ok := st["sync"].(map[string]any)
+	if !ok || syncObj["last_success_at"] == nil {
+		t.Fatalf("sync snapshot %+v", st)
+	}
+	acct, ok := st["account"].(map[string]any)
+	if !ok || acct["status"] != "ACTIVE" {
+		t.Fatalf("account %+v", st)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/portfolios/"+pid.String()+"/alpaca/reconciliation", nil)
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("reconcile status %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	var recon map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &recon); err != nil {
+		t.Fatal(err)
+	}
+	mismatches, _ := recon["mismatches"].([]any)
+	if len(mismatches) != 2 {
+		t.Fatalf("want 2 mismatches got %v", recon)
 	}
 }
