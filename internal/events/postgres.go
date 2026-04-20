@@ -397,6 +397,373 @@ func (s *PostgresStore) RevokeSession(ctx context.Context, sessionID uuid.UUID) 
 	return nil
 }
 
+func (s *PostgresStore) CreateAgentSession(ctx context.Context, session AgentSession) (AgentSession, error) {
+	var requestedByUserID any
+	if session.RequestedByUserID != nil {
+		requestedByUserID = *session.RequestedByUserID
+	}
+	var temperature any
+	if session.Temperature != nil {
+		temperature = session.Temperature.String()
+	}
+	var maxTokens any
+	if session.MaxTokens != nil {
+		maxTokens = *session.MaxTokens
+	}
+	var inputTokens any
+	if session.InputTokens != nil {
+		inputTokens = *session.InputTokens
+	}
+	var outputTokens any
+	if session.OutputTokens != nil {
+		outputTokens = *session.OutputTokens
+	}
+	var estimatedCostUSD any
+	if session.EstimatedCostUSD != nil {
+		estimatedCostUSD = session.EstimatedCostUSD.String()
+	}
+	var errorCode any
+	if session.ErrorCode != nil {
+		errorCode = *session.ErrorCode
+	}
+	var errorMessage any
+	if session.ErrorMessage != nil {
+		errorMessage = *session.ErrorMessage
+	}
+	var startedAt any
+	if session.StartedAt != nil {
+		startedAt = session.StartedAt.UTC()
+	}
+	var completedAt any
+	if session.CompletedAt != nil {
+		completedAt = session.CompletedAt.UTC()
+	}
+	out, err := s.scanAgentSession(s.pool.QueryRow(ctx, `
+		INSERT INTO agent_sessions (
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd, error_code, error_message, started_at, completed_at, created_at, updated_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5::date, $6,
+			$7, $8, $9::numeric, $10, $11, $12::jsonb, $13::jsonb,
+			$14::jsonb, $15::jsonb, $16, $17, $18,
+			$19::numeric, $20, $21, $22, $23, NOW(), NOW()
+		)
+		RETURNING
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+	`,
+		session.SessionID,
+		session.PortfolioID,
+		requestedByUserID,
+		session.TriggerSource,
+		session.RunDate.UTC(),
+		session.Status,
+		session.Provider,
+		session.Model,
+		temperature,
+		maxTokens,
+		session.SystemPrompt,
+		[]byte(session.UserPrompt),
+		[]byte(session.ResponseRaw),
+		[]byte(session.ResponseValidated),
+		[]byte(session.ValidationErrors),
+		inputTokens,
+		outputTokens,
+		session.ToolCallCount,
+		estimatedCostUSD,
+		errorCode,
+		errorMessage,
+		startedAt,
+		completedAt,
+	))
+	if err != nil {
+		return AgentSession{}, fmt.Errorf("create agent session: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) MarkAgentSessionRunning(ctx context.Context, sessionID uuid.UUID, startedAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_sessions
+		SET status = 'running',
+		    started_at = $2,
+		    updated_at = NOW()
+		WHERE session_id = $1
+	`, sessionID, startedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("mark agent session running: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) AppendAgentSessionToolCall(ctx context.Context, call AgentSessionToolCall) (AgentSessionToolCall, error) {
+	var latencyMS any
+	if call.LatencyMS != nil {
+		latencyMS = *call.LatencyMS
+	}
+	var errorMessage any
+	if call.ErrorMessage != nil {
+		errorMessage = *call.ErrorMessage
+	}
+	out, err := s.scanAgentSessionToolCall(s.pool.QueryRow(ctx, `
+		INSERT INTO agent_session_tool_calls (
+			session_id, seq_no, tool_name, tool_input, tool_output, latency_ms, success, error_message, created_at
+		)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, NOW())
+		RETURNING id, session_id, seq_no, tool_name, tool_input, tool_output, latency_ms, success, error_message, created_at
+	`,
+		call.SessionID,
+		call.SeqNo,
+		call.ToolName,
+		[]byte(call.ToolInput),
+		[]byte(call.ToolOutput),
+		latencyMS,
+		call.Success,
+		errorMessage,
+	))
+	if err != nil {
+		return AgentSessionToolCall{}, fmt.Errorf("append agent session tool call: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) CompleteAgentSessionSuccess(ctx context.Context, session AgentSession) error {
+	var responseRaw any = []byte(session.ResponseRaw)
+	var responseValidated any = []byte(session.ResponseValidated)
+	var validationErrors any = []byte(session.ValidationErrors)
+	var inputTokens any
+	if session.InputTokens != nil {
+		inputTokens = *session.InputTokens
+	}
+	var outputTokens any
+	if session.OutputTokens != nil {
+		outputTokens = *session.OutputTokens
+	}
+	var estimatedCostUSD any
+	if session.EstimatedCostUSD != nil {
+		estimatedCostUSD = session.EstimatedCostUSD.String()
+	}
+	var completedAt any = time.Now().UTC()
+	if session.CompletedAt != nil {
+		completedAt = session.CompletedAt.UTC()
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_sessions
+		SET status = 'succeeded',
+		    response_raw = $2::jsonb,
+		    response_validated = $3::jsonb,
+		    validation_errors = $4::jsonb,
+		    input_tokens = $5,
+		    output_tokens = $6,
+		    tool_call_count = $7,
+		    estimated_cost_usd = $8::numeric,
+		    error_code = NULL,
+		    error_message = NULL,
+		    completed_at = $9,
+		    updated_at = NOW()
+		WHERE session_id = $1
+	`,
+		session.SessionID,
+		responseRaw,
+		responseValidated,
+		validationErrors,
+		inputTokens,
+		outputTokens,
+		session.ToolCallCount,
+		estimatedCostUSD,
+		completedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("complete agent session success: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) CompleteAgentSessionFailure(ctx context.Context, session AgentSession) error {
+	var responseRaw any = []byte(session.ResponseRaw)
+	var responseValidated any = []byte(session.ResponseValidated)
+	var validationErrors any = []byte(session.ValidationErrors)
+	var inputTokens any
+	if session.InputTokens != nil {
+		inputTokens = *session.InputTokens
+	}
+	var outputTokens any
+	if session.OutputTokens != nil {
+		outputTokens = *session.OutputTokens
+	}
+	var estimatedCostUSD any
+	if session.EstimatedCostUSD != nil {
+		estimatedCostUSD = session.EstimatedCostUSD.String()
+	}
+	var errorCode any
+	if session.ErrorCode != nil {
+		errorCode = *session.ErrorCode
+	}
+	var errorMessage any
+	if session.ErrorMessage != nil {
+		errorMessage = *session.ErrorMessage
+	}
+	status := strings.TrimSpace(session.Status)
+	if status == "" || status == "succeeded" || status == "running" || status == "queued" {
+		status = "failed"
+	}
+	var completedAt any = time.Now().UTC()
+	if session.CompletedAt != nil {
+		completedAt = session.CompletedAt.UTC()
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_sessions
+		SET status = $2,
+		    response_raw = $3::jsonb,
+		    response_validated = $4::jsonb,
+		    validation_errors = $5::jsonb,
+		    input_tokens = $6,
+		    output_tokens = $7,
+		    tool_call_count = $8,
+		    estimated_cost_usd = $9::numeric,
+		    error_code = $10,
+		    error_message = $11,
+		    completed_at = $12,
+		    updated_at = NOW()
+		WHERE session_id = $1
+	`,
+		session.SessionID,
+		status,
+		responseRaw,
+		responseValidated,
+		validationErrors,
+		inputTokens,
+		outputTokens,
+		session.ToolCallCount,
+		estimatedCostUSD,
+		errorCode,
+		errorMessage,
+		completedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("complete agent session failure: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetLatestAgentSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (AgentSession, bool, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE portfolio_id = $1
+		ORDER BY created_at DESC, session_id DESC
+		LIMIT 1
+	`, portfolioID)
+	out, err := s.scanAgentSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentSession{}, false, nil
+	}
+	if err != nil {
+		return AgentSession{}, false, fmt.Errorf("get latest agent session for portfolio: %w", err)
+	}
+	return out, true, nil
+}
+
+func (s *PostgresStore) ListAgentSessionsForPortfolio(ctx context.Context, portfolioID uuid.UUID, filter AgentSessionListFilter) ([]AgentSession, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	statuses := make([]string, 0, len(filter.Statuses))
+	for _, status := range filter.Statuses {
+		s := strings.TrimSpace(status)
+		if s == "" {
+			continue
+		}
+		statuses = append(statuses, s)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE portfolio_id = $1
+		  AND (COALESCE(array_length($2::text[], 1), 0) = 0 OR status = ANY($2::text[]))
+		ORDER BY created_at DESC, session_id DESC
+		LIMIT $3 OFFSET $4
+	`, portfolioID, statuses, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list agent sessions for portfolio: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AgentSession, 0)
+	for rows.Next() {
+		row, err := s.scanAgentSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan agent session list row: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent sessions list: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) GetAgentSessionReplayByID(ctx context.Context, sessionID uuid.UUID) (AgentSessionReplay, bool, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE session_id = $1
+	`, sessionID)
+	session, err := s.scanAgentSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentSessionReplay{}, false, nil
+	}
+	if err != nil {
+		return AgentSessionReplay{}, false, fmt.Errorf("get agent session replay session: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, session_id, seq_no, tool_name, tool_input, tool_output, latency_ms, success, error_message, created_at
+		FROM agent_session_tool_calls
+		WHERE session_id = $1
+		ORDER BY seq_no ASC, id ASC
+	`, sessionID)
+	if err != nil {
+		return AgentSessionReplay{}, false, fmt.Errorf("get agent session replay tool calls: %w", err)
+	}
+	defer rows.Close()
+	toolCalls := make([]AgentSessionToolCall, 0)
+	for rows.Next() {
+		call, err := s.scanAgentSessionToolCall(rows)
+		if err != nil {
+			return AgentSessionReplay{}, false, fmt.Errorf("scan agent session replay tool call: %w", err)
+		}
+		toolCalls = append(toolCalls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return AgentSessionReplay{}, false, fmt.Errorf("iterate agent session replay tool calls: %w", err)
+	}
+	return AgentSessionReplay{
+		Session:   session,
+		ToolCalls: toolCalls,
+	}, true, nil
+}
+
 func (s *PostgresStore) LoadPriceFeedWatchlist(ctx context.Context) ([]string, bool, error) {
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `
@@ -450,6 +817,158 @@ func normalizeWatchlistSymbols(symbols []string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+func nullableInt64PtrToInt(v sql.NullInt64) *int {
+	if !v.Valid {
+		return nil
+	}
+	n := int(v.Int64)
+	return &n
+}
+
+func nullableStringPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	s := v.String
+	return &s
+}
+
+func nullableUUIDPtr(v sql.NullString) (*uuid.UUID, error) {
+	if !v.Valid || strings.TrimSpace(v.String) == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(v.String)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+func nullableDecimalPtr(v sql.NullString) (*decimal.Decimal, error) {
+	if !v.Valid || strings.TrimSpace(v.String) == "" {
+		return nil, nil
+	}
+	d, err := decimal.NewFromString(v.String)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func rawJSONPtr(v []byte) json.RawMessage {
+	if len(v) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), v...)
+}
+
+func (s *PostgresStore) scanAgentSession(scannable interface{ Scan(dest ...any) error }) (AgentSession, error) {
+	var out AgentSession
+	var requestedByUserID sql.NullString
+	var runDate time.Time
+	var temperature sql.NullString
+	var maxTokens sql.NullInt64
+	var responseRaw []byte
+	var responseValidated []byte
+	var validationErrors []byte
+	var inputTokens sql.NullInt64
+	var outputTokens sql.NullInt64
+	var estimatedCostUSD sql.NullString
+	var errorCode sql.NullString
+	var errorMessage sql.NullString
+	var startedAt sql.NullTime
+	var completedAt sql.NullTime
+	if err := scannable.Scan(
+		&out.SessionID,
+		&out.PortfolioID,
+		&requestedByUserID,
+		&out.TriggerSource,
+		&runDate,
+		&out.Status,
+		&out.Provider,
+		&out.Model,
+		&temperature,
+		&maxTokens,
+		&out.SystemPrompt,
+		&out.UserPrompt,
+		&responseRaw,
+		&responseValidated,
+		&validationErrors,
+		&inputTokens,
+		&outputTokens,
+		&out.ToolCallCount,
+		&estimatedCostUSD,
+		&errorCode,
+		&errorMessage,
+		&startedAt,
+		&completedAt,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	); err != nil {
+		return AgentSession{}, err
+	}
+	requestedBy, err := nullableUUIDPtr(requestedByUserID)
+	if err != nil {
+		return AgentSession{}, fmt.Errorf("parse requested_by_user_id: %w", err)
+	}
+	out.RequestedByUserID = requestedBy
+	out.RunDate = runDate.UTC()
+	out.RunDate = time.Date(out.RunDate.Year(), out.RunDate.Month(), out.RunDate.Day(), 0, 0, 0, 0, time.UTC)
+	out.CreatedAt = out.CreatedAt.UTC()
+	out.UpdatedAt = out.UpdatedAt.UTC()
+	if startedAt.Valid {
+		t := startedAt.Time.UTC()
+		out.StartedAt = &t
+	}
+	if completedAt.Valid {
+		t := completedAt.Time.UTC()
+		out.CompletedAt = &t
+	}
+	out.Temperature, err = nullableDecimalPtr(temperature)
+	if err != nil {
+		return AgentSession{}, fmt.Errorf("parse temperature: %w", err)
+	}
+	out.MaxTokens = nullableInt64PtrToInt(maxTokens)
+	out.ResponseRaw = rawJSONPtr(responseRaw)
+	out.ResponseValidated = rawJSONPtr(responseValidated)
+	out.ValidationErrors = rawJSONPtr(validationErrors)
+	out.InputTokens = nullableInt64PtrToInt(inputTokens)
+	out.OutputTokens = nullableInt64PtrToInt(outputTokens)
+	out.EstimatedCostUSD, err = nullableDecimalPtr(estimatedCostUSD)
+	if err != nil {
+		return AgentSession{}, fmt.Errorf("parse estimated_cost_usd: %w", err)
+	}
+	out.ErrorCode = nullableStringPtr(errorCode)
+	out.ErrorMessage = nullableStringPtr(errorMessage)
+	return out, nil
+}
+
+func (s *PostgresStore) scanAgentSessionToolCall(scannable interface{ Scan(dest ...any) error }) (AgentSessionToolCall, error) {
+	var out AgentSessionToolCall
+	var toolOutput []byte
+	var latencyMS sql.NullInt64
+	var errorMessage sql.NullString
+	if err := scannable.Scan(
+		&out.ID,
+		&out.SessionID,
+		&out.SeqNo,
+		&out.ToolName,
+		&out.ToolInput,
+		&toolOutput,
+		&latencyMS,
+		&out.Success,
+		&errorMessage,
+		&out.CreatedAt,
+	); err != nil {
+		return AgentSessionToolCall{}, err
+	}
+	out.ToolOutput = rawJSONPtr(toolOutput)
+	out.LatencyMS = nullableInt64PtrToInt(latencyMS)
+	out.ErrorMessage = nullableStringPtr(errorMessage)
+	out.CreatedAt = out.CreatedAt.UTC()
+	return out, nil
 }
 
 // Append inserts a canonical event in one transaction. On idempotency conflict, returns the stored event_id.

@@ -92,6 +92,58 @@ type UserSession struct {
 	CreatedAt time.Time
 }
 
+type AgentSession struct {
+	SessionID          uuid.UUID
+	PortfolioID        uuid.UUID
+	RequestedByUserID  *uuid.UUID
+	TriggerSource      string
+	RunDate            time.Time
+	Status             string
+	Provider           string
+	Model              string
+	Temperature        *decimal.Decimal
+	MaxTokens          *int
+	SystemPrompt       string
+	UserPrompt         json.RawMessage
+	ResponseRaw        json.RawMessage
+	ResponseValidated  json.RawMessage
+	ValidationErrors   json.RawMessage
+	InputTokens        *int
+	OutputTokens       *int
+	ToolCallCount      int
+	EstimatedCostUSD   *decimal.Decimal
+	ErrorCode          *string
+	ErrorMessage       *string
+	StartedAt          *time.Time
+	CompletedAt        *time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type AgentSessionToolCall struct {
+	ID           int64
+	SessionID    uuid.UUID
+	SeqNo        int
+	ToolName     string
+	ToolInput    json.RawMessage
+	ToolOutput   json.RawMessage
+	LatencyMS    *int
+	Success      bool
+	ErrorMessage *string
+	CreatedAt    time.Time
+}
+
+type AgentSessionListFilter struct {
+	Statuses []string
+	Limit    int
+	Offset   int
+}
+
+type AgentSessionReplay struct {
+	Session   AgentSession
+	ToolCalls []AgentSessionToolCall
+}
+
 // Writer contains mutating event/projection operations.
 type Writer interface {
 	Append(ctx context.Context, event domain.EventEnvelope) (AppendResult, error)
@@ -104,6 +156,11 @@ type Writer interface {
 	PersistApplyDLQ(ctx context.Context, portfolioID uuid.UUID, portfolioKey string, ev domain.EventEnvelope, reason string, cause error) error
 	// InsertPortfolioSnapshot appends a portfolio_snapshots row. Duplicate (portfolio_id, as_of_event_time, as_of_event_id) returns Inserted=false.
 	InsertPortfolioSnapshot(ctx context.Context, portfolioID uuid.UUID, asOfEventTime time.Time, asOfEventID uuid.UUID, snapshot json.RawMessage) (PortfolioSnapshotInsertResult, error)
+	CreateAgentSession(ctx context.Context, session AgentSession) (AgentSession, error)
+	MarkAgentSessionRunning(ctx context.Context, sessionID uuid.UUID, startedAt time.Time) error
+	AppendAgentSessionToolCall(ctx context.Context, call AgentSessionToolCall) (AgentSessionToolCall, error)
+	CompleteAgentSessionSuccess(ctx context.Context, session AgentSession) error
+	CompleteAgentSessionFailure(ctx context.Context, session AgentSession) error
 }
 
 // Reader contains read-only stream/projection queries.
@@ -159,6 +216,9 @@ type Reader interface {
 	LoadPriceFeedWatchlist(ctx context.Context) (watchlist []string, found bool, err error)
 	// UpsertPriceFeedWatchlist persists the automated feed watchlist.
 	UpsertPriceFeedWatchlist(ctx context.Context, watchlist []string) error
+	GetLatestAgentSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (AgentSession, bool, error)
+	ListAgentSessionsForPortfolio(ctx context.Context, portfolioID uuid.UUID, filter AgentSessionListFilter) ([]AgentSession, error)
+	GetAgentSessionReplayByID(ctx context.Context, sessionID uuid.UUID) (AgentSessionReplay, bool, error)
 }
 
 // Repository combines all read/write behavior for current concrete store.
