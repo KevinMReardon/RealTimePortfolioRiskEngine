@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
@@ -42,6 +43,12 @@ type RouterConfig struct {
 	AuthStore AuthStore
 	// AuthConfig controls session cookie behavior.
 	AuthConfig AuthConfig
+	// AgentService enables AI portfolio briefing endpoints.
+	AgentService agent.AgentService
+	// AgentMaxTokens default for briefing requests when client omits max_tokens.
+	AgentMaxTokens int
+	// AgentTemperature default for briefing requests when client omits temperature.
+	AgentTemperature float64
 	// SingleUserApp rejects creating a second catalog portfolio when true (matches config.SINGLE_USER_APP).
 	SingleUserApp bool
 
@@ -160,6 +167,12 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 				portfolioOwnershipChecker(cfg.ReadPortfolio),
 				cfg.AlpacaImportEnabled,
 			))
+		}
+		if cfg.AgentService != nil && cfg.AuthStore != nil {
+			read.POST("/portfolios/:id/briefings", postBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions, cfg.AgentMaxTokens, cfg.AgentTemperature))
+			read.GET("/portfolios/:id/briefings/latest", getLatestBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.GET("/portfolios/:id/briefings", getBriefingsHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.GET("/agent-sessions/:session_id/replay", getBriefingReplayHandler(cfg.AgentService, cfg.ReadPortfolio))
 		}
 	}
 	if cfg.AuthStore != nil {

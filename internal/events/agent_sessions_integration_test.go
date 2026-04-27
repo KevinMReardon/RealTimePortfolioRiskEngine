@@ -222,3 +222,47 @@ func TestAgentSessionReplayOrdersToolCallsBySeqNo(t *testing.T) {
 		t.Fatalf("tool call names order: got [%s,%s]", replay.ToolCalls[0].ToolName, replay.ToolCalls[1].ToolName)
 	}
 }
+
+func TestAgentSessionScheduledUniquePerPortfolioPerDay(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	repo := NewPostgresStore(pool)
+
+	portfolioID := uuid.New()
+	cleanupAgentSessionData(t, ctx, pool, uuid.Nil, portfolioID, uuid.Nil)
+	t.Cleanup(func() { cleanupAgentSessionData(t, ctx, pool, uuid.Nil, portfolioID, uuid.Nil) })
+
+	if _, err := repo.CreatePortfolio(ctx, portfolioID, "agent-unique-test", "USD"); err != nil {
+		t.Fatalf("CreatePortfolio: %v", err)
+	}
+
+	runDate := time.Date(2026, 4, 21, 13, 0, 0, 0, time.UTC)
+	_, err := repo.CreateAgentSession(ctx, AgentSession{
+		SessionID:     uuid.New(),
+		PortfolioID:   portfolioID,
+		TriggerSource: "scheduled",
+		RunDate:       runDate,
+		Status:        "queued",
+		Provider:      "anthropic",
+		Model:         "claude-test",
+		SystemPrompt:  "system",
+		UserPrompt:    json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("first CreateAgentSession: %v", err)
+	}
+	_, err = repo.CreateAgentSession(ctx, AgentSession{
+		SessionID:     uuid.New(),
+		PortfolioID:   portfolioID,
+		TriggerSource: "scheduled",
+		RunDate:       runDate.Add(3 * time.Hour),
+		Status:        "queued",
+		Provider:      "anthropic",
+		Model:         "claude-test",
+		SystemPrompt:  "system",
+		UserPrompt:    json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("expected unique constraint error for same portfolio + scheduled day")
+	}
+}

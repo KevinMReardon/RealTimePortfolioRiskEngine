@@ -113,6 +113,30 @@ func (s *PostgresStore) ListPortfoliosByOwner(ctx context.Context, ownerUserID u
 	return out, rows.Err()
 }
 
+// ListAgentBriefingEligiblePortfolios returns portfolios with a bound owner (auth-aligned scope).
+func (s *PostgresStore) ListAgentBriefingEligiblePortfolios(ctx context.Context) ([]AgentBriefingEligiblePortfolio, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT portfolio_id, owner_user_id
+		FROM portfolios
+		WHERE owner_user_id IS NOT NULL
+		ORDER BY created_at DESC, portfolio_id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list agent briefing eligible portfolios: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]AgentBriefingEligiblePortfolio, 0)
+	for rows.Next() {
+		var e AgentBriefingEligiblePortfolio
+		if err := rows.Scan(&e.PortfolioID, &e.OwnerUserID); err != nil {
+			return nil, fmt.Errorf("scan agent briefing eligible row: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // CreatePortfolio inserts one catalog row and returns the stored values.
 func (s *PostgresStore) CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error) {
 	var out PortfolioCatalogEntry

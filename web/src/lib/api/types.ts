@@ -193,6 +193,91 @@ export type IngestResponse = {
   status: "created" | "duplicate" | string;
 };
 
+export type BriefingIdea = {
+  symbol?: string;
+  rationale: string;
+  confidence: number;
+  size: string;
+  stop: string;
+  target: string;
+};
+
+export type BriefingOutput = {
+  market_summary: string;
+  portfolio_context: string;
+  trade_ideas: BriefingIdea[];
+  risks_and_caveats: string;
+  data_gaps: string[];
+  disclaimer: string;
+  used_sources: string[];
+  used_fields: string[];
+};
+
+export type BriefingCreateResponse = {
+  session_id: string;
+  status: string;
+  output?: BriefingOutput;
+};
+
+export type BriefingCreateRequestOptions = {
+  user_input?: Record<string, unknown>;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  scheduled?: boolean;
+  run_date?: string;
+};
+
+export type AgentSessionDTO = {
+  SessionID: string;
+  PortfolioID: string;
+  RequestedByUserID?: string | null;
+  TriggerSource: string;
+  RunDate: string;
+  Status: string;
+  Provider: string;
+  Model: string;
+  Temperature?: string | null;
+  MaxTokens?: number | null;
+  SystemPrompt: string;
+  UserPrompt?: unknown;
+  ResponseRaw?: unknown;
+  ResponseValidated?: unknown;
+  ValidationErrors?: unknown;
+  InputTokens?: number | null;
+  OutputTokens?: number | null;
+  ToolCallCount: number;
+  EstimatedCostUSD?: string | null;
+  ErrorCode?: string | null;
+  ErrorMessage?: string | null;
+  StartedAt?: string | null;
+  CompletedAt?: string | null;
+  CreatedAt: string;
+  UpdatedAt: string;
+};
+
+export type AgentSessionToolCallDTO = {
+  ID: number;
+  SessionID: string;
+  SeqNo: number;
+  ToolName: string;
+  ToolInput?: unknown;
+  ToolOutput?: unknown;
+  LatencyMS?: number | null;
+  Success: boolean;
+  ErrorMessage?: string | null;
+  CreatedAt: string;
+};
+
+export type ListBriefingsResponse = {
+  items: AgentSessionDTO[];
+};
+
+export type SessionReplayResponse = {
+  Session: AgentSessionDTO;
+  ToolCalls: AgentSessionToolCallDTO[];
+};
+
 export type APIErrorBody = {
   error_code: string;
   message: string;

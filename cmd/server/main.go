@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/api"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
@@ -266,6 +267,59 @@ func run() error {
 		)
 	}
 
+	var agentSvc agent.AgentService
+	if cfg.AgentBriefingRuntimeEnabled() {
+		if strings.TrimSpace(cfg.AnthropicAPIKey) == "" {
+			logger.Warn("agent_briefing_disabled_missing_api_key")
+		} else {
+			anthropicClient := agent.NewHTTPAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL)
+			toolExec := agent.NewToolDispatcher(repo, nil, nil)
+			agentSvc = agent.NewServiceWithLoggerAndTimeout(
+				repo,
+				anthropicClient,
+				toolExec,
+				"anthropic",
+				cfg.AgentModel,
+				logger,
+				cfg.AgentSessionTimeout,
+			)
+			logger.Info("agent_briefing_enabled",
+				zap.String("provider", "anthropic"),
+				zap.String("model", cfg.AgentModel),
+				zap.Bool("scheduler_enabled", cfg.AgentBriefingSchedulerRuntimeEnabled()),
+				zap.Duration("session_timeout", cfg.AgentSessionTimeout),
+			)
+		}
+	} else {
+		logger.Info("agent_briefing_disabled", zap.String("reason", "config_disabled"))
+	}
+
+	agentBriefingCtx, agentBriefingCancel := context.WithCancel(context.Background())
+	defer agentBriefingCancel()
+	var agentBriefingWG sync.WaitGroup
+	if agentSvc != nil && cfg.AgentBriefingSchedulerRuntimeEnabled() {
+		sched, err := agent.NewBriefingCronScheduler(
+			logger,
+			agentSvc,
+			repo,
+			cfg.AgentBriefingCron,
+			cfg.AgentBriefingTZ,
+		)
+		if err != nil {
+			logger.Warn("agent_briefing_scheduler_init_failed", zap.Error(err))
+		} else {
+			agentBriefingWG.Add(1)
+			go func() {
+				defer agentBriefingWG.Done()
+				sched.Run(agentBriefingCtx)
+			}()
+			logger.Info("agent_briefing_scheduler_spawned",
+				zap.String("cron", cfg.AgentBriefingCron),
+				zap.String("tz", cfg.AgentBriefingTZ),
+			)
+		}
+	}
+
 	alpacaImportAPIEnabled := cfg.AlpacaImportJobsEnabled() && defaultAlpacaREST != nil
 
 	router := api.NewRouter(api.RouterConfig{
@@ -298,6 +352,9 @@ func run() error {
 		AlpacaREST:                defaultAlpacaREST,
 		AlpacaSyncStore:           alpacaSyncStore,
 		AlpacaConfigured:          defaultAlpacaREST != nil,
+		AgentService:              agentSvc,
+		AgentMaxTokens:            cfg.AgentMaxTokens,
+		AgentTemperature:          cfg.AgentTemperature,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -372,6 +429,18 @@ func run() error {
 	}
 	if cfg.PriceFeedEnabled {
 		logger.Info("price_feed_stopped")
+	}
+
+	agentBriefingCancel()
+	agentBriefingStopped := make(chan struct{})
+	go func() {
+		defer close(agentBriefingStopped)
+		agentBriefingWG.Wait()
+	}()
+	select {
+	case <-agentBriefingStopped:
+	case <-shutdownCtx.Done():
+		return shutdownCtx.Err()
 	}
 
 	if err := server.Shutdown(shutdownCtx); err != nil {

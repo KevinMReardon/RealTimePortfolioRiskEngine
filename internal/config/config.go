@@ -39,6 +39,14 @@ const (
 	defaultAlpacaImportTimeoutSec = 7200
 	defaultAlpacaDataBaseURL      = "https://data.alpaca.markets"
 	defaultPriceFeedAlpacaRPM     = 200
+	defaultAgentBriefingCron      = "0 13 * * 1-5"
+	defaultAgentBriefingTZ        = "America/New_York"
+	defaultAgentModel             = "claude-sonnet-4.6"
+	defaultAgentMaxTokens         = 2048
+	defaultAgentTemperature       = 0.2
+	defaultAgentMaxToolCalls      = 12
+	defaultAgentMaxTurns          = 8
+	defaultAgentSessionTimeoutSec = 120
 )
 
 type Config struct {
@@ -187,6 +195,35 @@ type Config struct {
 	// AlpacaImportJobTimeout caps one BackfillFills run per job.
 	// Env: ALPACA_IMPORT_JOB_TIMEOUT_SECONDS (default 7200).
 	AlpacaImportJobTimeout time.Duration
+
+	// AgentBriefingEnabled toggles Anthropic-backed briefing APIs.
+	// Env: AGENT_BRIEFING_ENABLED.
+	AgentBriefingEnabled bool
+	// AgentBriefingSchedulerEnabled toggles scheduled daily briefings.
+	// Env: AGENT_BRIEFING_SCHEDULER_ENABLED.
+	AgentBriefingSchedulerEnabled bool
+	// AgentBriefingCron is the 5-field cron schedule for daily briefings.
+	// Env: AGENT_BRIEFING_CRON (default "0 13 * * 1-5").
+	AgentBriefingCron string
+	// AgentBriefingTZ is IANA timezone for cron interpretation.
+	// Env: AGENT_BRIEFING_TZ (default "America/New_York").
+	AgentBriefingTZ string
+	// AnthropicAPIKey from ANTHROPIC_API_KEY (trimmed). Empty disables provider calls.
+	AnthropicAPIKey string
+	// AnthropicBaseURL from ANTHROPIC_BASE_URL (optional).
+	AnthropicBaseURL string
+	// AgentModel from AGENT_MODEL (default claude-sonnet-4.6).
+	AgentModel string
+	// AgentMaxTokens from AGENT_MAX_TOKENS (default 2048, min 256).
+	AgentMaxTokens int
+	// AgentTemperature from AGENT_TEMPERATURE (default 0.2, clamped [0,1]).
+	AgentTemperature float64
+	// AgentMaxToolCalls from AGENT_MAX_TOOL_CALLS (default 12, min 1).
+	AgentMaxToolCalls int
+	// AgentMaxTurns from AGENT_MAX_TURNS (default 8, min 1).
+	AgentMaxTurns int
+	// AgentSessionTimeout from AGENT_SESSION_TIMEOUT_SECONDS (default 120, min 10s).
+	AgentSessionTimeout time.Duration
 }
 
 func Load() (Config, error) {
@@ -361,6 +398,41 @@ func Load() (Config, error) {
 	if alpacaImportTimeoutSec < 60 {
 		alpacaImportTimeoutSec = 60
 	}
+	agentBriefingCron := strings.TrimSpace(getEnv("AGENT_BRIEFING_CRON", defaultAgentBriefingCron))
+	if agentBriefingCron == "" {
+		agentBriefingCron = defaultAgentBriefingCron
+	}
+	agentBriefingTZ := strings.TrimSpace(getEnv("AGENT_BRIEFING_TZ", defaultAgentBriefingTZ))
+	if agentBriefingTZ == "" {
+		agentBriefingTZ = defaultAgentBriefingTZ
+	}
+	agentModel := strings.TrimSpace(getEnv("AGENT_MODEL", defaultAgentModel))
+	if agentModel == "" {
+		agentModel = defaultAgentModel
+	}
+	agentMaxTokens := getEnvInt("AGENT_MAX_TOKENS", defaultAgentMaxTokens)
+	if agentMaxTokens < 256 {
+		agentMaxTokens = 256
+	}
+	agentTemperature := getEnvFloat64("AGENT_TEMPERATURE", defaultAgentTemperature)
+	if agentTemperature < 0 {
+		agentTemperature = 0
+	}
+	if agentTemperature > 1 {
+		agentTemperature = 1
+	}
+	agentMaxToolCalls := getEnvInt("AGENT_MAX_TOOL_CALLS", defaultAgentMaxToolCalls)
+	if agentMaxToolCalls < 1 {
+		agentMaxToolCalls = 1
+	}
+	agentMaxTurns := getEnvInt("AGENT_MAX_TURNS", defaultAgentMaxTurns)
+	if agentMaxTurns < 1 {
+		agentMaxTurns = 1
+	}
+	agentSessionTimeoutSec := getEnvInt("AGENT_SESSION_TIMEOUT_SECONDS", defaultAgentSessionTimeoutSec)
+	if agentSessionTimeoutSec < 10 {
+		agentSessionTimeoutSec = 10
+	}
 
 	cfg := Config{
 		Port:                            getEnv("PORT", defaultPort),
@@ -418,6 +490,21 @@ func Load() (Config, error) {
 		AlpacaSyncHistoryLookback:   time.Duration(alpacaHistDays) * 24 * time.Hour,
 		AlpacaImportJobPollInterval: time.Duration(alpacaImportPollSec) * time.Second,
 		AlpacaImportJobTimeout:      time.Duration(alpacaImportTimeoutSec) * time.Second,
+		AgentBriefingEnabled:        getEnvBool("AGENT_BRIEFING_ENABLED", false),
+		AgentBriefingSchedulerEnabled: getEnvBool(
+			"AGENT_BRIEFING_SCHEDULER_ENABLED",
+			false,
+		),
+		AgentBriefingCron: agentBriefingCron,
+		AgentBriefingTZ:   agentBriefingTZ,
+		AnthropicAPIKey:   strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
+		AnthropicBaseURL:  strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+		AgentModel:        agentModel,
+		AgentMaxTokens:    agentMaxTokens,
+		AgentTemperature:  agentTemperature,
+		AgentMaxToolCalls: agentMaxToolCalls,
+		AgentMaxTurns:     agentMaxTurns,
+		AgentSessionTimeout: time.Duration(agentSessionTimeoutSec) * time.Second,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -441,6 +528,16 @@ func (c Config) AlpacaImportJobsEnabled() bool {
 	hasPaper := strings.TrimSpace(c.AlpacaPaperKeyID) != "" && strings.TrimSpace(c.AlpacaPaperSecretKey) != ""
 	hasLive := strings.TrimSpace(c.AlpacaLiveKeyID) != "" && strings.TrimSpace(c.AlpacaLiveSecretKey) != ""
 	return hasPaper || hasLive
+}
+
+// AgentBriefingRuntimeEnabled reports whether briefing endpoints should be enabled.
+func (c Config) AgentBriefingRuntimeEnabled() bool {
+	return c.AgentBriefingEnabled
+}
+
+// AgentBriefingSchedulerRuntimeEnabled reports whether the scheduled runner should start.
+func (c Config) AgentBriefingSchedulerRuntimeEnabled() bool {
+	return c.AgentBriefingEnabled && c.AgentBriefingSchedulerEnabled
 }
 
 func getEnv(key, fallback string) string {
@@ -472,6 +569,19 @@ func getEnvInt(key string, fallback int) int {
 	}
 
 	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func getEnvFloat64(key string, fallback float64) float64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+
+	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return fallback
 	}

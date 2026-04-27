@@ -61,6 +61,27 @@ var (
 		Name: "alpaca_sync_fill_outcomes_total",
 		Help: "Per-fill ingestion outcomes during Alpaca sync.",
 	}, []string{"result"})
+	agentSessionOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "agent_session_outcomes_total",
+		Help: "Agent briefing session terminal outcomes.",
+	}, []string{"status", "trigger_source"})
+	agentToolCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "agent_tool_calls_total",
+		Help: "Agent tool call results.",
+	}, []string{"tool_name", "status"})
+	agentToolLatencySeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "agent_tool_latency_seconds",
+		Help:    "Latency of agent tool calls.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"tool_name"})
+	agentValidationFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "agent_validation_failures_total",
+		Help: "Agent output validation failures.",
+	})
+	agentTokenUsageTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "agent_token_usage_total",
+		Help: "Agent provider token usage.",
+	}, []string{"direction"})
 )
 
 func ensureMetricsRegistered() {
@@ -78,6 +99,11 @@ func ensureMetricsRegistered() {
 			priceFeedRateLimitHitsTotal,
 			alpacaSyncRunsTotal,
 			alpacaSyncFillOutcomesTotal,
+			agentSessionOutcomesTotal,
+			agentToolCallsTotal,
+			agentToolLatencySeconds,
+			agentValidationFailuresTotal,
+			agentTokenUsageTotal,
 		)
 		projectionLagSeconds.WithLabelValues("trade").Set(0)
 		projectionLagSeconds.WithLabelValues("price").Set(0)
@@ -167,4 +193,45 @@ func ObserveAlpacaFillOutcome(result string) {
 		result = "unknown"
 	}
 	alpacaSyncFillOutcomesTotal.WithLabelValues(result).Inc()
+}
+
+func ObserveAgentSessionOutcome(status, triggerSource string) {
+	ensureMetricsRegistered()
+	if status == "" {
+		status = "unknown"
+	}
+	if triggerSource == "" {
+		triggerSource = "unknown"
+	}
+	agentSessionOutcomesTotal.WithLabelValues(status, triggerSource).Inc()
+}
+
+func ObserveAgentToolCall(toolName, status string, latency time.Duration) {
+	ensureMetricsRegistered()
+	if toolName == "" {
+		toolName = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	agentToolCallsTotal.WithLabelValues(toolName, status).Inc()
+	if latency < 0 {
+		latency = 0
+	}
+	agentToolLatencySeconds.WithLabelValues(toolName).Observe(latency.Seconds())
+}
+
+func IncAgentValidationFailure() {
+	ensureMetricsRegistered()
+	agentValidationFailuresTotal.Inc()
+}
+
+func AddAgentTokenUsage(inputTokens, outputTokens *int) {
+	ensureMetricsRegistered()
+	if inputTokens != nil && *inputTokens > 0 {
+		agentTokenUsageTotal.WithLabelValues("input").Add(float64(*inputTokens))
+	}
+	if outputTokens != nil && *outputTokens > 0 {
+		agentTokenUsageTotal.WithLabelValues("output").Add(float64(*outputTokens))
+	}
 }

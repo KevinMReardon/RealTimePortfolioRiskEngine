@@ -67,6 +67,12 @@ type AlpacaSyncTarget struct {
 	AlpacaBaseURL     string
 }
 
+// AgentBriefingEligiblePortfolio is one portfolio the briefing scheduler may target.
+type AgentBriefingEligiblePortfolio struct {
+	PortfolioID uuid.UUID
+	OwnerUserID uuid.UUID
+}
+
 type AlpacaPortfolioLinkInput struct {
 	AlpacaAccountMode string
 	AlpacaSyncEnabled bool
@@ -93,31 +99,31 @@ type UserSession struct {
 }
 
 type AgentSession struct {
-	SessionID          uuid.UUID
-	PortfolioID        uuid.UUID
-	RequestedByUserID  *uuid.UUID
-	TriggerSource      string
-	RunDate            time.Time
-	Status             string
-	Provider           string
-	Model              string
-	Temperature        *decimal.Decimal
-	MaxTokens          *int
-	SystemPrompt       string
-	UserPrompt         json.RawMessage
-	ResponseRaw        json.RawMessage
-	ResponseValidated  json.RawMessage
-	ValidationErrors   json.RawMessage
-	InputTokens        *int
-	OutputTokens       *int
-	ToolCallCount      int
-	EstimatedCostUSD   *decimal.Decimal
-	ErrorCode          *string
-	ErrorMessage       *string
-	StartedAt          *time.Time
-	CompletedAt        *time.Time
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	SessionID         uuid.UUID
+	PortfolioID       uuid.UUID
+	RequestedByUserID *uuid.UUID
+	TriggerSource     string
+	RunDate           time.Time
+	Status            string
+	Provider          string
+	Model             string
+	Temperature       *decimal.Decimal
+	MaxTokens         *int
+	SystemPrompt      string
+	UserPrompt        json.RawMessage
+	ResponseRaw       json.RawMessage
+	ResponseValidated json.RawMessage
+	ValidationErrors  json.RawMessage
+	InputTokens       *int
+	OutputTokens      *int
+	ToolCallCount     int
+	EstimatedCostUSD  *decimal.Decimal
+	ErrorCode         *string
+	ErrorMessage      *string
+	StartedAt         *time.Time
+	CompletedAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type AgentSessionToolCall struct {
@@ -193,6 +199,9 @@ type Reader interface {
 	ListPortfolios(ctx context.Context) ([]PortfolioCatalogEntry, error)
 	// ListPortfoliosByOwner returns catalog rows for exactly one owner.
 	ListPortfoliosByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]PortfolioCatalogEntry, error)
+	// ListAgentBriefingEligiblePortfolios returns user-owned catalog rows for scheduled agent briefings.
+	// Rows without owner_user_id are omitted so background jobs never target unscoped catalog entries.
+	ListAgentBriefingEligiblePortfolios(ctx context.Context) ([]AgentBriefingEligiblePortfolio, error)
 	// CreatePortfolio inserts one portfolio catalog row.
 	CreatePortfolio(ctx context.Context, portfolioID uuid.UUID, name, baseCurrency string) (PortfolioCatalogEntry, error)
 	// CreatePortfolioForOwner inserts one owner-scoped portfolio catalog row.
