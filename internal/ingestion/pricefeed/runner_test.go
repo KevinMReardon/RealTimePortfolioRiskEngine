@@ -144,7 +144,7 @@ func TestEmitQuote_MonotonicSourceSequenceAndIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestEmitQuote_DropsStaleQuotes(t *testing.T) {
+func TestEmitQuote_AllowsOlderQuoteWhenItCanAdvanceProjection(t *testing.T) {
 	t.Parallel()
 	rec := &ingestRecorder{}
 	partitions := config.DerivePriceStreamPartitions(uuid.MustParse("00000000-0000-4000-8000-000000000001"), 2)
@@ -170,14 +170,14 @@ func TestEmitQuote_DropsStaleQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("emitQuote: %v", err)
 	}
-	if ingested || dedupSkipped {
-		t.Fatalf("expected only stale drop, ingested=%v dedup=%v", ingested, dedupSkipped)
+	if !ingested || dedupSkipped {
+		t.Fatalf("expected ingest without dedup, ingested=%v dedup=%v", ingested, dedupSkipped)
 	}
-	if !droppedStale {
-		t.Fatalf("expected droppedStale=true")
+	if droppedStale {
+		t.Fatalf("expected droppedStale=false")
 	}
-	if len(rec.events) != 0 {
-		t.Fatalf("expected no events, got %d", len(rec.events))
+	if len(rec.events) != 1 {
+		t.Fatalf("expected one ingested event, got %d", len(rec.events))
 	}
 }
 

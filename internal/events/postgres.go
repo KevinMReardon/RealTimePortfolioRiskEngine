@@ -1656,6 +1656,7 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 				as_of = EXCLUDED.as_of,
 				updated_at = NOW(),
 				as_of_event_id = EXCLUDED.as_of_event_id
+			WHERE EXCLUDED.as_of > prices_projection.as_of
 		`, p.Symbol, p.Price.String(), ev.EventTime, ev.EventID)
 		if err != nil {
 			return fmt.Errorf("upsert prices_projection %s: %w", p.Symbol, err)

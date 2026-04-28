@@ -311,9 +311,6 @@ func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pr
 	if asOf.IsZero() {
 		asOf = time.Now().UTC()
 	}
-	if r.cfg.MaxQuoteAge > 0 && time.Since(asOf) > r.cfg.MaxQuoteAge {
-		return false, true, false, nil
-	}
 	if r.shouldDedup(symbol, q.Price, asOf) {
 		return false, false, true, nil
 	}
