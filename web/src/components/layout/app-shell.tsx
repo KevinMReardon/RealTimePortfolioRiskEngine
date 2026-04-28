@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  ArrowLeftRight,
   BarChart3,
   BrainCircuit,
   LayoutDashboard,
@@ -31,7 +30,6 @@ const nav = [
   { href: "/portfolios", label: "Portfolio", icon: LineChart },
   { href: "/briefing", label: "Briefing", icon: BrainCircuit },
   { href: "/integrations/alpaca", label: "Alpaca", icon: Plug },
-  { href: "/ingest/trade", label: "Record trade", icon: ArrowLeftRight },
   { href: "/ingest/price", label: "Price data", icon: BarChart3 },
 ] as const;
 
@@ -137,7 +135,7 @@ export function AppShell({
         className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/90 backdrop-blur lg:hidden"
         aria-label="Mobile primary"
       >
-        <div className="grid grid-cols-6 gap-1 px-2 py-2">
+        <div className="grid grid-cols-5 gap-1 px-2 py-2">
           {nav.map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(`${item.href}/`);
