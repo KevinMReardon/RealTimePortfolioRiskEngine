@@ -18,6 +18,7 @@ const (
 	ErrCodeUnauthorized             = "UNAUTHORIZED"
 	ErrCodeForbidden                = "FORBIDDEN"
 	ErrCodeRateLimited              = "RATE_LIMITED"
+	ErrCodeNotImplemented           = "NOT_IMPLEMENTED"
 )
 
 // APIError is the standard JSON error envelope (LLD §12).

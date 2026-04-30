@@ -63,6 +63,7 @@ func run() error {
 	var proposalStore *proposals.Store
 	if cfg.ProposalsRuntimeEnabled() {
 		proposalStore = proposals.NewStore(dbPool)
+		proposalStore.SetLogger(logger)
 		logger.Info("proposals_store_wired",
 			zap.Bool("proposal_store_ready", proposalStore != nil),
 			zap.Bool("trading_halt_env", cfg.TradingHalt),
@@ -378,6 +379,7 @@ func run() error {
 		AgentService:              agentSvc,
 		AgentMaxTokens:            cfg.AgentMaxTokens,
 		AgentTemperature:          cfg.AgentTemperature,
+		ProposalsStore:            proposalStore,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

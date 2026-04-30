@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/shopspring/decimal"
 )
 
@@ -253,6 +254,21 @@ func Evaluate(intent Intent, snap Snapshot, cfg Config) Decision {
 	if cfg.Mode == ModeMonitor && out.StrictOutcome == OutcomeDeny {
 		out.EffectiveOutcome = OutcomeAllow
 	}
+
+	primaryRule := "none"
+	if len(out.Violations) > 0 {
+		primaryRule = out.Violations[0].Code
+	}
+	killBlocked := false
+	var ksSrc string
+	for i := range out.Violations {
+		if out.Violations[i].Code == RuleKillSwitch {
+			killBlocked = true
+			ksSrc = killSwitchSource(snap)
+			break
+		}
+	}
+	observability.ObservePolicyEvaluation(string(out.EffectiveOutcome), primaryRule, killBlocked, ksSrc)
 
 	return out
 }

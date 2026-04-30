@@ -13,13 +13,24 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
 // Store is a Postgres-backed proposal + kill-switch + equity anchor helper.
 type Store struct {
 	pool *pgxpool.Pool
+	log  *zap.Logger
+}
+
+// SetLogger sets optional structured logging for proposal lifecycle (nil disables).
+func (s *Store) SetLogger(l *zap.Logger) {
+	if s == nil {
+		return
+	}
+	s.log = l
 }
 
 // NewStore returns a Store backed by pool.
@@ -83,7 +94,28 @@ func (s *Store) InsertProposal(ctx context.Context, p InsertParams) (Proposal, e
 	if err := row.Scan(&proposalID); err != nil {
 		return Proposal{}, fmt.Errorf("proposals: insert proposed_trades: %w", err)
 	}
-	return s.GetByIDForPortfolio(ctx, p.PortfolioID, proposalID)
+	prop, err := s.GetByIDForPortfolio(ctx, p.PortfolioID, proposalID)
+	if err != nil {
+		return Proposal{}, err
+	}
+	observability.IncProposedTradeTransition("none", "proposed")
+	if s.log != nil {
+		fields := []zap.Field{
+			zap.String("proposal_id", prop.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
+			zap.String("policy_config_hash", prop.PolicyConfigHash),
+			zap.String("inputs_hash", prop.PolicyInputsHash),
+			zap.String("payload_hash", prop.PayloadHash),
+			zap.String("effective_outcome", string(p.Decision.EffectiveOutcome)),
+			zap.String("strict_outcome", string(p.Decision.StrictOutcome)),
+			zap.String("policy_mode", string(p.Mode)),
+		}
+		if p.AgentSessionID != nil {
+			fields = append(fields, zap.String("agent_session_id", p.AgentSessionID.String()))
+		}
+		s.log.Info("proposal_inserted", fields...)
+	}
+	return prop, nil
 }
 
 func nullableDecimalString(d *decimal.Decimal) interface{} {
@@ -192,6 +224,14 @@ func (s *Store) ApproveProposal(ctx context.Context, p ApproveParams) error {
 	if tag.RowsAffected() == 0 {
 		return ErrApproveConflict
 	}
+	observability.IncProposedTradeTransition("proposed", "approved")
+	if s.log != nil {
+		s.log.Info("proposal_approved",
+			zap.String("proposal_id", p.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
+			zap.String("approved_by_user_id", p.UserID.String()),
+		)
+	}
 	return nil
 }
 
@@ -217,6 +257,14 @@ func (s *Store) DenyProposal(ctx context.Context, p DenyParams) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrDenyConflict
+	}
+	observability.IncProposedTradeTransition("proposed", "rejected")
+	if s.log != nil {
+		s.log.Info("proposal_rejected",
+			zap.String("proposal_id", p.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
+			zap.String("denied_by_user_id", p.UserID.String()),
+		)
 	}
 	return nil
 }

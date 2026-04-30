@@ -82,6 +82,24 @@ var (
 		Name: "agent_token_usage_total",
 		Help: "Agent provider token usage.",
 	}, []string{"direction"})
+
+	// Phase 2: policy + proposed trades
+	policyEvaluationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "policy_evaluations_total",
+		Help: "Policy Evaluate calls (effective outcome and primary rule code or none).",
+	}, []string{"outcome", "rule_code"})
+	policyKillSwitchBlocksTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "policy_kill_switch_blocks_total",
+		Help: "Kill-switch violations recorded during policy evaluation.",
+	}, []string{"source"})
+	proposedTradeTransitionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "proposed_trade_transitions_total",
+		Help: "Proposed trade status transitions (e.g. insert, approve, deny).",
+	}, []string{"from", "to"})
+	proposalSubmitNotImplementedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "proposal_submit_not_implemented_total",
+		Help: "Calls to proposal submit endpoint (execution not implemented).",
+	})
 )
 
 func ensureMetricsRegistered() {
@@ -104,6 +122,10 @@ func ensureMetricsRegistered() {
 			agentToolLatencySeconds,
 			agentValidationFailuresTotal,
 			agentTokenUsageTotal,
+			policyEvaluationsTotal,
+			policyKillSwitchBlocksTotal,
+			proposedTradeTransitionsTotal,
+			proposalSubmitNotImplementedTotal,
 		)
 		projectionLagSeconds.WithLabelValues("trade").Set(0)
 		projectionLagSeconds.WithLabelValues("price").Set(0)
@@ -234,4 +256,41 @@ func AddAgentTokenUsage(inputTokens, outputTokens *int) {
 	if outputTokens != nil && *outputTokens > 0 {
 		agentTokenUsageTotal.WithLabelValues("output").Add(float64(*outputTokens))
 	}
+}
+
+// ObservePolicyEvaluation records one policy.Evaluate result (primary rule = first violation or "none").
+func ObservePolicyEvaluation(effectiveOutcome, primaryRuleCode string, killSwitchBlocked bool, killSwitchSource string) {
+	ensureMetricsRegistered()
+	if effectiveOutcome == "" {
+		effectiveOutcome = "unknown"
+	}
+	if primaryRuleCode == "" {
+		primaryRuleCode = "none"
+	}
+	policyEvaluationsTotal.WithLabelValues(effectiveOutcome, primaryRuleCode).Inc()
+	if killSwitchBlocked {
+		src := killSwitchSource
+		if src == "" {
+			src = "unknown"
+		}
+		policyKillSwitchBlocksTotal.WithLabelValues(src).Inc()
+	}
+}
+
+// IncProposedTradeTransition records a proposal row lifecycle transition.
+func IncProposedTradeTransition(fromStatus, toStatus string) {
+	ensureMetricsRegistered()
+	if fromStatus == "" {
+		fromStatus = "unknown"
+	}
+	if toStatus == "" {
+		toStatus = "unknown"
+	}
+	proposedTradeTransitionsTotal.WithLabelValues(fromStatus, toStatus).Inc()
+}
+
+// IncProposalSubmitNotImplemented records a hit on the stub submit endpoint.
+func IncProposalSubmitNotImplemented() {
+	ensureMetricsRegistered()
+	proposalSubmitNotImplementedTotal.Inc()
 }

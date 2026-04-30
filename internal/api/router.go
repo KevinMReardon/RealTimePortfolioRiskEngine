@@ -12,6 +12,7 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 )
 
 type healthResponse struct {
@@ -75,6 +76,9 @@ type RouterConfig struct {
 	AlpacaSyncStore *alpaca.SyncStateStore
 	// AlpacaConfigured is true when the process successfully constructed an Alpaca REST client.
 	AlpacaConfigured bool
+
+	// ProposalsStore enables Phase 2 proposal HTTP APIs when non-nil (typically PROPOSALS_ENABLED).
+	ProposalsStore *proposals.Store
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -173,6 +177,12 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			read.GET("/portfolios/:id/briefings/latest", getLatestBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/portfolios/:id/briefings", getBriefingsHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/agent-sessions/:session_id/replay", getBriefingReplayHandler(cfg.AgentService, cfg.ReadPortfolio))
+		}
+		if cfg.ProposalsStore != nil && cfg.AuthStore != nil {
+			read.GET("/portfolios/:id/proposals", getProposalsHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.POST("/portfolios/:id/proposals/:proposal_id/approve", postProposalApproveHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.POST("/portfolios/:id/proposals/:proposal_id/deny", postProposalDenyHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.POST("/portfolios/:id/proposals/:proposal_id/submit", postProposalSubmitHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions, logger))
 		}
 	}
 	if cfg.AuthStore != nil {
