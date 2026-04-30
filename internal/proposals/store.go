@@ -221,6 +221,34 @@ func (s *Store) DenyProposal(ctx context.Context, p DenyParams) error {
 	return nil
 }
 
+// LoadEquityAnchorForPortfolioDate returns stored anchor equity for portfolio on anchorDate (calendar date).
+// ok is false when no row exists (caller may use zero equity in policy snapshot).
+func (s *Store) LoadEquityAnchorForPortfolioDate(ctx context.Context, portfolioID uuid.UUID, anchorDate time.Time) (equity decimal.Decimal, ok bool, err error) {
+	if s == nil || s.pool == nil {
+		return decimal.Zero, false, fmt.Errorf("proposals: nil store")
+	}
+	d := time.Date(anchorDate.Year(), anchorDate.Month(), anchorDate.Day(), 0, 0, 0, 0, time.UTC)
+	var raw sql.NullString
+	q := s.pool.QueryRow(ctx, `
+		SELECT equity::text FROM portfolio_equity_anchor
+		WHERE portfolio_id = $1 AND anchor_date = $2::date
+	`, portfolioID, d)
+	if err := q.Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return decimal.Zero, false, nil
+		}
+		return decimal.Zero, false, fmt.Errorf("proposals: load equity anchor: %w", err)
+	}
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return decimal.Zero, false, nil
+	}
+	dec, err := decimal.NewFromString(strings.TrimSpace(raw.String))
+	if err != nil {
+		return decimal.Zero, false, fmt.Errorf("proposals: parse equity anchor: %w", err)
+	}
+	return dec, true, nil
+}
+
 // UpsertEquityAnchor sets equity for portfolio on anchorDate (calendar date; use date parts in UTC or NY-local date).
 func (s *Store) UpsertEquityAnchor(ctx context.Context, portfolioID uuid.UUID, anchorDate time.Time, equity decimal.Decimal) error {
 	if s == nil || s.pool == nil {

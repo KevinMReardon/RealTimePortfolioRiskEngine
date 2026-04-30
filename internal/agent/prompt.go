@@ -38,7 +38,7 @@ func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolConte
 		input = "{}"
 	}
 	return fmt.Sprintf(
-		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nTOOL_CONTEXT:\n%s\n\nINSTRUCTIONS:\n- Propose only; do not claim execution.\n- Use unknown when data is missing.\n- Include used_sources and used_fields for factual/numeric statements.",
+		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nTOOL_CONTEXT:\n%s\n\nINSTRUCTIONS:\n- Propose only; do not claim execution.\n- Use unknown when data is missing.\n- Include used_sources and used_fields for factual/numeric statements.\n- For each actionable trade idea, fill structured fields on the trade_ideas object when you can: symbol, side (BUY or SELL), quantity or notional_usd, order_type (e.g. market or limit), limit_price when order_type is limit, time_in_force (e.g. day). Omit structured fields entirely for non-actionable commentary.",
 		input,
 		portfolio,
 		risk,

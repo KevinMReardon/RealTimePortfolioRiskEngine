@@ -53,6 +53,19 @@ type BriefingIdea struct {
 	Size       string  `json:"size"`
 	Stop       string  `json:"stop"`
 	Target     string  `json:"target"`
+
+	// Optional structured order hints for proposal materialization (when fully populated).
+	Side        string `json:"side,omitempty"`
+	Quantity    string `json:"quantity,omitempty"`
+	NotionalUSD string `json:"notional_usd,omitempty"`
+	OrderType   string `json:"order_type,omitempty"`
+	LimitPrice  string `json:"limit_price,omitempty"`
+	TimeInForce string `json:"time_in_force,omitempty"`
+}
+
+// ProposalMaterializer persists evaluated proposed_trades after a successful briefing (optional on Service).
+type ProposalMaterializer interface {
+	Materialize(ctx context.Context, portfolioID, sessionID uuid.UUID, out BriefingOutput) error
 }
 
 type RunBriefingRequest struct {

@@ -26,6 +26,7 @@ type Service struct {
 	model        string
 	log          *zap.Logger
 	sessionTimeout time.Duration
+	materializer   ProposalMaterializer
 }
 
 const (
@@ -41,7 +42,7 @@ func NewService(store AgentStore, client AnthropicClient, toolExecutor ToolExecu
 }
 
 func NewServiceWithLogger(store AgentStore, client AnthropicClient, toolExecutor ToolExecutor, provider, model string, log *zap.Logger) *Service {
-	return NewServiceWithLoggerAndTimeout(store, client, toolExecutor, provider, model, log, defaultTimeoutBudget)
+	return NewServiceWithLoggerAndTimeout(store, client, toolExecutor, provider, model, log, defaultTimeoutBudget, nil)
 }
 
 func NewServiceWithLoggerAndTimeout(
@@ -51,6 +52,7 @@ func NewServiceWithLoggerAndTimeout(
 	provider, model string,
 	log *zap.Logger,
 	sessionTimeout time.Duration,
+	materializer ProposalMaterializer,
 ) *Service {
 	if log == nil {
 		log = zap.NewNop()
@@ -59,13 +61,14 @@ func NewServiceWithLoggerAndTimeout(
 		sessionTimeout = defaultTimeoutBudget
 	}
 	return &Service{
-		store:        store,
-		client:       client,
-		toolExecutor: toolExecutor,
-		provider:     provider,
-		model:        model,
-		log:          log,
+		store:          store,
+		client:         client,
+		toolExecutor:   toolExecutor,
+		provider:       provider,
+		model:          model,
+		log:            log,
 		sessionTimeout: sessionTimeout,
+		materializer:   materializer,
 	}
 }
 
@@ -503,6 +506,13 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		CompletedAt:       timePtr(time.Now().UTC()),
 	}); err != nil {
 		return RunBriefingResult{}, fmt.Errorf("complete agent session success: %w", err)
+	}
+	if s.materializer != nil {
+		matCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.materializer.Materialize(matCtx, req.PortfolioID, sessionID, validated); err != nil {
+			s.log.Warn("proposal_materialize_failed", zap.Error(err))
+		}
 	}
 	terminalPersisted = true
 	observability.ObserveAgentSessionOutcome("succeeded", trigger)

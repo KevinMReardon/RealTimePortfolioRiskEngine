@@ -7,6 +7,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/shopspring/decimal"
+
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
 const (
@@ -120,6 +125,42 @@ func ValidateBriefingOutput(raw json.RawMessage) (BriefingOutput, error) {
 		}
 		if idea.Confidence < 0 || idea.Confidence > 1 {
 			issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidConfidence, Field: prefix + ".confidence", Detail: "must be between 0 and 1 inclusive"})
+		}
+		if tradeIdeaHasAnyStructuredField(idea) {
+			sym := policy.NormalizeSymbol(strings.TrimSpace(idea.Symbol))
+			if sym == "" {
+				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".symbol", Detail: "required when structured order fields are set"})
+			} else if !domain.IsValidSymbol(sym) {
+				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".symbol", Detail: "must be a valid US equity symbol"})
+			}
+			side := domain.Side(strings.ToUpper(strings.TrimSpace(idea.Side)))
+			if strings.TrimSpace(idea.Side) == "" {
+				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".side", Detail: "required when structured order fields are set (BUY or SELL)"})
+			} else if !domain.IsValidSide(side) {
+				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".side", Detail: "must be BUY or SELL"})
+			}
+			hasQty := strings.TrimSpace(idea.Quantity) != ""
+			hasNotional := strings.TrimSpace(idea.NotionalUSD) != ""
+			if !hasQty && !hasNotional {
+				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".quantity", Detail: "quantity or notional_usd is required when structured order fields are set"})
+			}
+			if hasQty {
+				if _, err := decimal.NewFromString(strings.TrimSpace(idea.Quantity)); err != nil {
+					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".quantity", Detail: "must be a decimal number"})
+				}
+			}
+			if hasNotional {
+				if _, err := decimal.NewFromString(strings.TrimSpace(idea.NotionalUSD)); err != nil {
+					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".notional_usd", Detail: "must be a decimal number"})
+				}
+			}
+			if orderTypeImpliesLimit(idea.OrderType) {
+				if strings.TrimSpace(idea.LimitPrice) == "" {
+					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".limit_price", Detail: "required when order_type is a limit order"})
+				} else if _, err := decimal.NewFromString(strings.TrimSpace(idea.LimitPrice)); err != nil {
+					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".limit_price", Detail: "must be a decimal number"})
+				}
+			}
 		}
 	}
 	if len(issues) > 0 {
@@ -297,16 +338,36 @@ func normalizeTradeIdeas(v any) []map[string]any {
 		if !ok {
 			continue
 		}
-		out = append(out, map[string]any{
-			"symbol":     anyToString(m["symbol"]),
+		ti := map[string]any{
+			"symbol":     policy.NormalizeSymbol(anyToString(m["symbol"])),
 			"rationale":  coalesceString(anyToString(m["rationale"]), anyToString(m["action"])),
 			"confidence": normalizeConfidence(m["confidence"]),
 			"size":       coalesceString(anyToString(m["size"]), anyToString(m["proposed_size"]), "unknown"),
 			"stop":       coalesceString(anyToString(m["stop"]), "unknown"),
 			"target":     coalesceString(anyToString(m["target"]), "unknown"),
-		})
+		}
+		for _, key := range []string{"side", "quantity", "notional_usd", "order_type", "limit_price", "time_in_force"} {
+			if s := strings.TrimSpace(anyToString(m[key])); s != "" {
+				ti[key] = s
+			}
+		}
+		out = append(out, ti)
 	}
 	return out
+}
+
+func tradeIdeaHasAnyStructuredField(idea BriefingIdea) bool {
+	return strings.TrimSpace(idea.Side) != "" ||
+		strings.TrimSpace(idea.Quantity) != "" ||
+		strings.TrimSpace(idea.NotionalUSD) != "" ||
+		strings.TrimSpace(idea.OrderType) != "" ||
+		strings.TrimSpace(idea.LimitPrice) != "" ||
+		strings.TrimSpace(idea.TimeInForce) != ""
+}
+
+func orderTypeImpliesLimit(orderType string) bool {
+	s := strings.ToLower(strings.TrimSpace(orderType))
+	return s != "" && strings.Contains(s, "limit")
 }
 
 func normalizeRisksAndCaveats(v any) string {

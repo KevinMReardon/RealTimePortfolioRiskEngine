@@ -545,6 +545,7 @@ func TestRunBriefing_UsesConfiguredSessionTimeout(t *testing.T) {
 		"claude-test",
 		nil,
 		timeout,
+		nil,
 	)
 	_, err := svc.RunBriefing(context.Background(), RunBriefingRequest{
 		PortfolioID:   uuid.New(),

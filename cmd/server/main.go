@@ -286,6 +286,16 @@ func run() error {
 		} else {
 			anthropicClient := agent.NewHTTPAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL)
 			toolExec := agent.NewToolDispatcher(repo, nil, nil)
+			var proposalMaterializer agent.ProposalMaterializer
+			if cfg.ProposalsRuntimeEnabled() && proposalStore != nil {
+				proposalMaterializer = &agent.BriefingProposalMaterializer{
+					Store:       proposalStore,
+					Loader:      repo,
+					Policy:      cfg.PolicyConfig(),
+					TradingHalt: cfg.TradingHalt,
+					Log:         logger,
+				}
+			}
 			agentSvc = agent.NewServiceWithLoggerAndTimeout(
 				repo,
 				anthropicClient,
@@ -294,6 +304,7 @@ func run() error {
 				cfg.AgentModel,
 				logger,
 				cfg.AgentSessionTimeout,
+				proposalMaterializer,
 			)
 			logger.Info("agent_briefing_enabled",
 				zap.String("provider", "anthropic"),
