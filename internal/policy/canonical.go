@@ -12,27 +12,27 @@ import (
 
 type inputsHashPayload struct {
 	Intent struct {
-		Symbol          string  `json:"symbol"`
-		Side            string  `json:"side"`
-		Quantity        *string `json:"quantity,omitempty"`
-		NotionalUSD     *string `json:"notional_usd,omitempty"`
-		OrderType       string  `json:"order_type"`
-		TimeInForce     string  `json:"time_in_force"`
-		LimitPrice      *string `json:"limit_price,omitempty"`
+		Symbol      string  `json:"symbol"`
+		Side        string  `json:"side"`
+		Quantity    *string `json:"quantity,omitempty"`
+		NotionalUSD *string `json:"notional_usd,omitempty"`
+		OrderType   string  `json:"order_type"`
+		TimeInForce string  `json:"time_in_force"`
+		LimitPrice  *string `json:"limit_price,omitempty"`
 	} `json:"intent"`
 	Snapshot struct {
-		PortfolioEquity       string            `json:"portfolio_equity"`
-		PositionQtyBySymbol   map[string]string `json:"position_qty_by_symbol"`
-		MarkPriceBySymbol     map[string]string `json:"mark_price_by_symbol"`
-		NowNYRFC3339Nano      string            `json:"now_ny_rfc3339nano"`
-		EquityAnchor          string            `json:"equity_anchor"`
-		KillSwitchEnv         bool              `json:"kill_switch_env"`
-		KillSwitchDB          bool              `json:"kill_switch_db"`
-		DailyNotionalUsedUSD  string            `json:"daily_notional_used_usd"`
-		OrdersLastMinute      int               `json:"orders_last_minute"`
-		BrokerPatternDayTrader *bool            `json:"broker_pattern_day_trader,omitempty"`
-		BrokerTradingBlocked   *bool            `json:"broker_trading_blocked,omitempty"`
-		BrokerAccountBlocked   *bool            `json:"broker_account_blocked,omitempty"`
+		PortfolioEquity        string            `json:"portfolio_equity"`
+		PositionQtyBySymbol    map[string]string `json:"position_qty_by_symbol"`
+		MarkPriceBySymbol      map[string]string `json:"mark_price_by_symbol"`
+		NowNYRFC3339Nano       string            `json:"now_ny_rfc3339nano"`
+		EquityAnchor           string            `json:"equity_anchor"`
+		KillSwitchEnv          bool              `json:"kill_switch_env"`
+		KillSwitchDB           bool              `json:"kill_switch_db"`
+		DailyNotionalUsedUSD   string            `json:"daily_notional_used_usd"`
+		OrdersLastMinute       int               `json:"orders_last_minute"`
+		BrokerPatternDayTrader *bool             `json:"broker_pattern_day_trader,omitempty"`
+		BrokerTradingBlocked   *bool             `json:"broker_trading_blocked,omitempty"`
+		BrokerAccountBlocked   *bool             `json:"broker_account_blocked,omitempty"`
 		BrokerEquity           *string           `json:"broker_equity,omitempty"`
 	} `json:"snapshot"`
 }
@@ -111,4 +111,38 @@ func CanonicalInputsBytes(intent Intent, snap Snapshot) []byte {
 		return nil
 	}
 	return raw
+}
+
+type orderIntentPayload struct {
+	Symbol      string  `json:"symbol"`
+	Side        string  `json:"side"`
+	Quantity    *string `json:"quantity,omitempty"`
+	NotionalUSD *string `json:"notional_usd,omitempty"`
+	OrderType   string  `json:"order_type,omitempty"`
+	TimeInForce string  `json:"time_in_force,omitempty"`
+	LimitPrice  *string `json:"limit_price,omitempty"`
+}
+
+// CanonicalOrderIntentBytes is stable JSON for the executable order leg only (approve/deny binding).
+func CanonicalOrderIntentBytes(intent Intent) []byte {
+	var p orderIntentPayload
+	p.Symbol = NormalizeSymbol(intent.Symbol)
+	p.Side = string(intent.Side)
+	p.Quantity = decimalPtrString(intent.Quantity)
+	p.NotionalUSD = decimalPtrString(intent.NotionalUSD)
+	p.OrderType = intent.OrderType
+	p.TimeInForce = intent.TimeInForce
+	p.LimitPrice = decimalPtrString(intent.LimitPrice)
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// OrderPayloadHash is SHA-256 hex of CanonicalOrderIntentBytes (proposed_trades.payload_hash).
+func OrderPayloadHash(intent Intent) string {
+	raw := CanonicalOrderIntentBytes(intent)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
