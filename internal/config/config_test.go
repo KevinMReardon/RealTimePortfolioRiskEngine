@@ -3,6 +3,9 @@ package config
 import (
 	"testing"
 	"time"
+
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
+	"github.com/shopspring/decimal"
 )
 
 func TestLoadAgentBriefingDefaults(t *testing.T) {
@@ -58,6 +61,28 @@ func TestLoadAgentBriefingDefaults(t *testing.T) {
 			cfg.AgentSessionTimeout,
 			time.Duration(defaultAgentSessionTimeoutSec)*time.Second,
 		)
+	}
+	if cfg.ProposalsEnabled {
+		t.Fatalf("ProposalsEnabled = true, want false")
+	}
+	if cfg.TradingHalt {
+		t.Fatalf("TradingHalt = true, want false")
+	}
+	if cfg.PolicyMode != policy.ModeEnforce {
+		t.Fatalf("PolicyMode = %v, want enforce", cfg.PolicyMode)
+	}
+	if cfg.ProposalsRuntimeEnabled() {
+		t.Fatalf("ProposalsRuntimeEnabled() = true, want false")
+	}
+	pc := cfg.PolicyConfig()
+	if pc.Mode != policy.ModeEnforce {
+		t.Fatalf("PolicyConfig().Mode = %v", pc.Mode)
+	}
+	if len(pc.SymbolWhitelist) != 0 || len(pc.SymbolBlacklist) != 0 {
+		t.Fatalf("policy lists should be empty by default")
+	}
+	if !pc.MaxOrderNotionalUSD.Equal(decimal.Zero) {
+		t.Fatalf("MaxOrderNotionalUSD should default to zero")
 	}
 }
 

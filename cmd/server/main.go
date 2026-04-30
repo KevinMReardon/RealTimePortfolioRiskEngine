@@ -21,6 +21,7 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/insights"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/risk"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,6 +59,17 @@ func run() error {
 	defer workerCancel()
 
 	repo := events.NewPostgresStore(dbPool)
+
+	var proposalStore *proposals.Store
+	if cfg.ProposalsRuntimeEnabled() {
+		proposalStore = proposals.NewStore(dbPool)
+		logger.Info("proposals_store_wired",
+			zap.Bool("proposal_store_ready", proposalStore != nil),
+			zap.Bool("trading_halt_env", cfg.TradingHalt),
+			zap.String("policy_mode", string(cfg.PolicyMode)),
+		)
+	}
+
 	stopWorkers, err := startWorkers(workerCtx, repo, logger, cfg)
 	if err != nil {
 		return err

@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
+
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
 const (
@@ -47,6 +50,7 @@ const (
 	defaultAgentMaxToolCalls      = 12
 	defaultAgentMaxTurns          = 8
 	defaultAgentSessionTimeoutSec = 120
+	defaultPolicyMode             = "enforce"
 )
 
 type Config struct {
@@ -224,6 +228,41 @@ type Config struct {
 	AgentMaxTurns int
 	// AgentSessionTimeout from AGENT_SESSION_TIMEOUT_SECONDS (default 120, min 10s).
 	AgentSessionTimeout time.Duration
+
+	// --- Phase 2 proposals / policy-as-code (HTTP wiring optional; see PROPOSALS_ENABLED) ---
+	// ProposalsEnabled toggles proposal persistence APIs when implemented.
+	// Env: PROPOSALS_ENABLED (default false).
+	ProposalsEnabled bool
+	// TradingHalt is a process-level kill switch folded into policy Snapshot.KillSwitchEnv (OR with DB row).
+	// Env: TRADING_HALT (default false).
+	TradingHalt bool
+	// PolicyMode selects enforce (block on violations) vs monitor (log violations, effective ALLOW).
+	// Env: POLICY_MODE — "enforce" (default) or "monitor".
+	PolicyMode policy.Mode
+	// PolicySymbolWhitelist is a comma-separated list; if non-empty, only these symbols may trade.
+	// Env: POLICY_SYMBOL_WHITELIST.
+	PolicySymbolWhitelist []string
+	// PolicySymbolBlacklist is a comma-separated list; listed symbols are denied.
+	// Env: POLICY_SYMBOL_BLACKLIST.
+	PolicySymbolBlacklist []string
+	// PolicyMaxOrderNotionalUSD caps a single order (USD notional). Zero disables the check.
+	// Env: POLICY_MAX_ORDER_NOTIONAL_USD.
+	PolicyMaxOrderNotionalUSD decimal.Decimal
+	// PolicyMaxDailyNotionalUSD caps cumulative notional per day. Zero disables.
+	// Env: POLICY_MAX_DAILY_NOTIONAL_USD.
+	PolicyMaxDailyNotionalUSD decimal.Decimal
+	// PolicyMaxPositionPct is max post-trade position market value as % of portfolio equity. Zero disables.
+	// Env: POLICY_MAX_POSITION_PCT.
+	PolicyMaxPositionPct decimal.Decimal
+	// PolicyMaxDailyLossPct is max day drawdown vs equity anchor as a positive percent (e.g. 2 = 2%). Zero disables.
+	// Env: POLICY_MAX_DAILY_LOSS_PCT.
+	PolicyMaxDailyLossPct decimal.Decimal
+	// PolicyMaxOrdersPerMinute rate-limits order evaluation/submit frequency. Zero disables.
+	// Env: POLICY_MAX_ORDERS_PER_MINUTE.
+	PolicyMaxOrdersPerMinute int
+	// PolicyVersion is an optional label embedded in policy_config_hash for audit.
+	// Env: POLICY_VERSION.
+	PolicyVersion string
 }
 
 func Load() (Config, error) {
@@ -434,6 +473,19 @@ func Load() (Config, error) {
 		agentSessionTimeoutSec = 10
 	}
 
+	policyModeRaw := strings.ToLower(strings.TrimSpace(getEnv("POLICY_MODE", defaultPolicyMode)))
+	var policyMode policy.Mode
+	switch policyModeRaw {
+	case "monitor":
+		policyMode = policy.ModeMonitor
+	default:
+		policyMode = policy.ModeEnforce
+	}
+	policyMaxOrdersPerMinute := getEnvInt("POLICY_MAX_ORDERS_PER_MINUTE", 0)
+	if policyMaxOrdersPerMinute < 0 {
+		policyMaxOrdersPerMinute = 0
+	}
+
 	cfg := Config{
 		Port:                            getEnv("PORT", defaultPort),
 		DatabaseURL:                     os.Getenv("DATABASE_URL"),
@@ -505,6 +557,18 @@ func Load() (Config, error) {
 		AgentMaxToolCalls: agentMaxToolCalls,
 		AgentMaxTurns:     agentMaxTurns,
 		AgentSessionTimeout: time.Duration(agentSessionTimeoutSec) * time.Second,
+
+		ProposalsEnabled:          getEnvBool("PROPOSALS_ENABLED", false),
+		TradingHalt:               getEnvBool("TRADING_HALT", false),
+		PolicyMode:                policyMode,
+		PolicySymbolWhitelist:     parseCSVSymbols(os.Getenv("POLICY_SYMBOL_WHITELIST")),
+		PolicySymbolBlacklist:     parseCSVSymbols(os.Getenv("POLICY_SYMBOL_BLACKLIST")),
+		PolicyMaxOrderNotionalUSD: getEnvDecimal("POLICY_MAX_ORDER_NOTIONAL_USD", decimal.Zero),
+		PolicyMaxDailyNotionalUSD: getEnvDecimal("POLICY_MAX_DAILY_NOTIONAL_USD", decimal.Zero),
+		PolicyMaxPositionPct:      getEnvDecimal("POLICY_MAX_POSITION_PCT", decimal.Zero),
+		PolicyMaxDailyLossPct:     getEnvDecimal("POLICY_MAX_DAILY_LOSS_PCT", decimal.Zero),
+		PolicyMaxOrdersPerMinute:  policyMaxOrdersPerMinute,
+		PolicyVersion:             strings.TrimSpace(os.Getenv("POLICY_VERSION")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -538,6 +602,28 @@ func (c Config) AgentBriefingRuntimeEnabled() bool {
 // AgentBriefingSchedulerRuntimeEnabled reports whether the scheduled runner should start.
 func (c Config) AgentBriefingSchedulerRuntimeEnabled() bool {
 	return c.AgentBriefingEnabled && c.AgentBriefingSchedulerEnabled
+}
+
+// ProposalsRuntimeEnabled reports whether Phase 2 proposal store and related paths should be active.
+func (c Config) ProposalsRuntimeEnabled() bool {
+	return c.ProposalsEnabled
+}
+
+// PolicyConfig builds internal/policy.Config from loaded env (for Evaluate and proposal persistence).
+func (c Config) PolicyConfig() policy.Config {
+	w := append([]string(nil), c.PolicySymbolWhitelist...)
+	b := append([]string(nil), c.PolicySymbolBlacklist...)
+	return policy.Config{
+		Mode:                   c.PolicyMode,
+		SymbolWhitelist:        w,
+		SymbolBlacklist:        b,
+		MaxOrderNotionalUSD:    c.PolicyMaxOrderNotionalUSD,
+		MaxDailyNotionalUSD:    c.PolicyMaxDailyNotionalUSD,
+		MaxPositionPct:         c.PolicyMaxPositionPct,
+		MaxDailyLossPct:        c.PolicyMaxDailyLossPct,
+		MaxOrdersPerMinute:     c.PolicyMaxOrdersPerMinute,
+		PolicyVersion:          c.PolicyVersion,
+	}
 }
 
 func getEnv(key, fallback string) string {
@@ -586,6 +672,18 @@ func getEnvFloat64(key string, fallback float64) float64 {
 		return fallback
 	}
 	return value
+}
+
+func getEnvDecimal(key string, fallback decimal.Decimal) decimal.Decimal {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	d, err := decimal.NewFromString(raw)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 // getEnvIntFromKeys returns the first successfully parsed int from the given env keys (in order).
