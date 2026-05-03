@@ -34,7 +34,8 @@ const (
 	defaultMaxToolCalls  = 12
 	defaultTimeoutBudget = 45 * time.Second
 	defaultMaxTokens     = 4096
-	terminalPersistBudget = 5 * time.Second
+	// Large response_raw + jsonb writes can exceed a few seconds under Docker/remote DB.
+	terminalPersistBudget = 30 * time.Second
 )
 
 func NewService(store AgentStore, client AnthropicClient, toolExecutor ToolExecutor, provider, model string) *Service {
@@ -475,7 +476,14 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 			ValidationErrors: redactJSON(validationJSON),
 			CompletedAt:      timePtr(time.Now().UTC()),
 		}); err != nil {
-			return RunBriefingResult{}, fmt.Errorf("complete invalid output failure: %w", err)
+			s.log.Warn("agent_session_invalid_output_persist_failed",
+				zap.String("session_id", sessionID.String()),
+				zap.String("portfolio_id", req.PortfolioID.String()),
+				zap.Error(err),
+			)
+			observability.IncAgentValidationFailure()
+			// Always return the validation error for API mapping (422); DB row may be finalized by defer.
+			return RunBriefingResult{}, fmt.Errorf("agent output validation failed: %w", valErr)
 		}
 		terminalPersisted = true
 		observability.ObserveAgentSessionOutcome("invalid_output", trigger)

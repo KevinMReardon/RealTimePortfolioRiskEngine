@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -130,8 +131,17 @@ func postBriefingHandler(
 			result, err = svc.CreateBriefingOnDemand(c.Request.Context(), req)
 		}
 		if err != nil {
+			var valErr *agent.ValidationError
+			if errors.As(err, &valErr) && valErr != nil && len(valErr.Issues) > 0 {
+				respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "briefing output failed validation", map[string]any{
+					"issues": valErr.Issues,
+				})
+				return
+			}
 			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "validation failed") || strings.Contains(msg, "invalid_output") {
+			if strings.Contains(msg, "validation failed") ||
+				strings.Contains(msg, "invalid_output") ||
+				strings.Contains(msg, "agent output validation") {
 				respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "briefing output failed validation", nil)
 				return
 			}

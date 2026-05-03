@@ -18,16 +18,30 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
+	"go.uber.org/zap"
 )
 
 // PostgresStore implements Repository against the v1 schema.
 type PostgresStore struct {
 	pool *pgxpool.Pool
+	log  *zap.Logger
 }
 
 // NewPostgresStore returns a repository backed by pool.
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+	return &PostgresStore{pool: pool, log: zap.NewNop()}
+}
+
+// SetLogger enables structured repository logs (optional).
+func (s *PostgresStore) SetLogger(log *zap.Logger) {
+	if s == nil {
+		return
+	}
+	if log == nil {
+		s.log = zap.NewNop()
+		return
+	}
+	s.log = log
 }
 
 func catalogAlpacaPtr(ns sql.NullString) *string {
@@ -1640,15 +1654,37 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	priceEventsSeen := 0
+	projectionRowsChanged := 0
+	skippedNotNewerCount := 0
+
 	for _, ev := range applied {
 		if ev.EventType != domain.EventTypePriceUpdated {
 			continue
 		}
+		priceEventsSeen++
 		var p domain.PricePayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return fmt.Errorf("%w: price payload: %v", domain.ErrInvalidPayload, err)
 		}
-		_, err = tx.Exec(ctx, `
+		var existingAsOf time.Time
+		var existingPriceText string
+		existingFound := false
+		err = tx.QueryRow(ctx, `
+			SELECT as_of, price::text
+			FROM prices_projection
+			WHERE symbol = $1
+		`, p.Symbol).Scan(&existingAsOf, &existingPriceText)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			existingFound = false
+		case err != nil:
+			return fmt.Errorf("load existing prices_projection %s: %w", p.Symbol, err)
+		default:
+			existingFound = true
+		}
+
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO prices_projection (symbol, price, as_of, updated_at, as_of_event_id)
 			VALUES ($1, $2::numeric, $3, NOW(), $4)
 			ON CONFLICT (symbol) DO UPDATE SET
@@ -1661,12 +1697,45 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 		if err != nil {
 			return fmt.Errorf("upsert prices_projection %s: %w", p.Symbol, err)
 		}
+		if tag.RowsAffected() > 0 {
+			projectionRowsChanged++
+		}
+		if tag.RowsAffected() == 0 && existingFound {
+			skippedNotNewerCount++
+			s.log.Info("prices_projection_update_skipped",
+				zap.String("symbol", p.Symbol),
+				zap.String("reason", "incoming_as_of_not_newer"),
+				zap.String("incoming_price", p.Price.String()),
+				zap.Time("incoming_as_of", ev.EventTime.UTC()),
+				zap.String("existing_price", existingPriceText),
+				zap.Time("existing_as_of", existingAsOf.UTC()),
+				zap.String("event_id", ev.EventID.String()),
+			)
+		}
 		if err := upsertSymbolReturn(ctx, tx, p.Symbol, p.Price, ev.EventTime, ev.EventID); err != nil {
 			return fmt.Errorf("upsert symbol_returns %s: %w", p.Symbol, err)
 		}
 		if err := trimSymbolReturnsWindow(ctx, tx, p.Symbol, symbolReturnsWindowN); err != nil {
 			return fmt.Errorf("trim symbol_returns %s: %w", p.Symbol, err)
 		}
+	}
+	if priceEventsSeen > 0 {
+		reason := "all_prices_applied"
+		switch {
+		case projectionRowsChanged == 0 && skippedNotNewerCount == priceEventsSeen:
+			reason = "all_prices_skipped_not_newer"
+		case projectionRowsChanged == 0:
+			reason = "no_projection_changes"
+		case skippedNotNewerCount > 0:
+			reason = "partial_projection_updates"
+		}
+		s.log.Info("prices_projection_batch_result",
+			zap.String("stream_portfolio_id", streamPortfolioID.String()),
+			zap.Int("price_events_seen", priceEventsSeen),
+			zap.Int("projection_rows_changed", projectionRowsChanged),
+			zap.Int("skipped_not_newer", skippedNotNewerCount),
+			zap.String("result_reason", reason),
+		)
 	}
 
 	if err := upsertProjectionCursor(ctx, tx, streamPortfolioID, CursorFromEvent(last)); err != nil {

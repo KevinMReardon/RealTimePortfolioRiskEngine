@@ -10,6 +10,12 @@ import {
   useCreateBriefingMutation,
   useLatestBriefingQuery,
 } from "@/hooks/use-briefing";
+import {
+  useApproveProposalMutation,
+  useDenyProposalMutation,
+  useProposalsQuery,
+  useSubmitProposalMutation,
+} from "@/hooks/use-proposals";
 import { usePortfoliosQuery } from "@/hooks/use-portfolio-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,6 +69,10 @@ export function BriefingPage() {
   const latestQ = useLatestBriefingQuery(selectedPortfolio);
   const listQ = useBriefingsListQuery(selectedPortfolio, 10, 0);
   const createM = useCreateBriefingMutation(selectedPortfolio ?? "");
+  const proposalsQ = useProposalsQuery(selectedPortfolio);
+  const approveProposalM = useApproveProposalMutation(selectedPortfolio ?? "");
+  const denyProposalM = useDenyProposalMutation(selectedPortfolio ?? "");
+  const submitProposalM = useSubmitProposalMutation(selectedPortfolio ?? "");
   const [settings, setSettings] = useState<BriefingSettingsState>(DEFAULT_SETTINGS);
 
   useEffect(() => {
@@ -87,6 +97,18 @@ export function BriefingPage() {
     () => readOutputFromSession(latestQ.data?.ResponseValidated),
     [latestQ.data?.ResponseValidated],
   );
+  const proposals = useMemo(() => proposalsQ.data?.proposals ?? [], [proposalsQ.data?.proposals]);
+  const proposalByTradeIdeaIndex = useMemo(() => {
+    const sessionId = latestQ.data?.SessionID ?? "";
+    const out = new Map<number, (typeof proposals)[number]>();
+    for (const p of proposals) {
+      if (p.agent_session_id && p.agent_session_id !== sessionId) continue;
+      if (typeof p.trade_idea_index === "number" && !out.has(p.trade_idea_index)) {
+        out.set(p.trade_idea_index, p);
+      }
+    }
+    return out;
+  }, [latestQ.data?.SessionID, proposals]);
 
   const state = resolvePageState({
     hasPortfolio: Boolean(selectedPortfolio),
@@ -241,6 +263,16 @@ export function BriefingPage() {
       </Card>
 
       {createM.error ? <ErrorAlert error={createM.error} title="Failed to start briefing" /> : null}
+      {proposalsQ.error ? <ErrorAlert error={proposalsQ.error} title="Failed to load proposals" /> : null}
+      {approveProposalM.error ? (
+        <ErrorAlert error={approveProposalM.error} title="Failed to approve proposal" />
+      ) : null}
+      {denyProposalM.error ? (
+        <ErrorAlert error={denyProposalM.error} title="Failed to reject proposal" />
+      ) : null}
+      {submitProposalM.error ? (
+        <ErrorAlert error={submitProposalM.error} title="Failed to execute proposal" />
+      ) : null}
       {state === "error" && latestQ.error ? <ErrorAlert error={latestQ.error} /> : null}
 
       {state === "idle" ? (
@@ -313,13 +345,28 @@ export function BriefingPage() {
                 {rankIdeas(latestOutput).length ? (
                   rankIdeas(latestOutput).map((idea, idx) => (
                     <div key={`${idea.symbol ?? "idea"}-${idx}`} className="rounded-md border p-3">
+                      {(() => {
+                        const proposal = proposalByTradeIdeaIndex.get(idx);
+                        const status = proposal ? proposalStatusLabel(proposal.status) : null;
+                        const proposalBusy =
+                          (approveProposalM.isPending &&
+                            approveProposalM.variables?.proposalId === proposal?.proposal_id) ||
+                          (denyProposalM.isPending &&
+                            denyProposalM.variables?.proposalId === proposal?.proposal_id) ||
+                          (submitProposalM.isPending &&
+                            submitProposalM.variables?.proposalId === proposal?.proposal_id);
+                        return (
+                          <>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="font-semibold">
                           #{idx + 1} {idea.symbol?.trim() || "Idea"}
                         </div>
-                        <Badge variant="outline">
-                          {Math.round((idea.confidence ?? 0) * 100)}% confidence
-                        </Badge>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline">
+                            {Math.round((idea.confidence ?? 0) * 100)}% confidence
+                          </Badge>
+                          {status ? <Badge variant="outline">{status}</Badge> : null}
+                        </div>
                       </div>
                       <div className="mt-2 grid gap-2 text-sm md:grid-cols-3">
                         <Meta label="Size" value={idea.size || "—"} />
@@ -329,6 +376,61 @@ export function BriefingPage() {
                       <p className="mt-2 text-sm text-muted-foreground">
                         {idea.rationale || "No rationale provided."}
                       </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {proposal?.status === "proposed" ? (
+                          <>
+                            <Button
+                              size="sm"
+                              disabled={proposalBusy}
+                              onClick={() =>
+                                approveProposalM.mutate({
+                                  proposalId: proposal.proposal_id,
+                                  payloadHash: proposal.payload_hash,
+                                  rowVersion: proposal.row_version,
+                                })
+                              }
+                            >
+                              {proposalBusy ? "Working..." : "Approve"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={proposalBusy}
+                              onClick={() =>
+                                denyProposalM.mutate({
+                                  proposalId: proposal.proposal_id,
+                                  payloadHash: proposal.payload_hash,
+                                  rowVersion: proposal.row_version,
+                                  denyReason: "Rejected from briefing UI",
+                                })
+                              }
+                            >
+                              {proposalBusy ? "Working..." : "Reject"}
+                            </Button>
+                          </>
+                        ) : null}
+                        {proposal?.status === "approved" ? (
+                          <Button
+                            size="sm"
+                            disabled={proposalBusy}
+                            onClick={() =>
+                              submitProposalM.mutate({
+                                proposalId: proposal.proposal_id,
+                              })
+                            }
+                          >
+                            {proposalBusy ? "Executing..." : "Execute trade"}
+                          </Button>
+                        ) : null}
+                        {!proposal ? (
+                          <span className="text-xs text-muted-foreground">
+                            Awaiting materialized proposal for this idea.
+                          </span>
+                        ) : null}
+                      </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))
                 ) : (
@@ -482,4 +584,13 @@ function resolvePageState(input: {
   if (!input.latestStatus) return "empty";
   if (input.latestStatus.toLowerCase() === "succeeded" && input.hasOutput) return "success";
   return "success";
+}
+
+function proposalStatusLabel(status: string): string {
+  const s = status.trim().toLowerCase();
+  if (s === "proposed") return "Pending approval";
+  if (s === "approved") return "Approved";
+  if (s === "rejected") return "Rejected";
+  if (s === "submitted") return "Submitted";
+  return status;
 }

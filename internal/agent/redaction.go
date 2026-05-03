@@ -19,7 +19,12 @@ func redactJSON(raw json.RawMessage) json.RawMessage {
 	}
 	var obj any
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return json.RawMessage(RedactText(string(raw)))
+		// Must remain valid JSON for Postgres jsonb columns (e.g. agent_sessions.response_raw).
+		fallback, mErr := json.Marshal(RedactText(string(raw)))
+		if mErr != nil {
+			return json.RawMessage(`{"redaction_error":true}`)
+		}
+		return json.RawMessage(fallback)
 	}
 	redacted := redactValue("", obj)
 	out, err := json.Marshal(redacted)

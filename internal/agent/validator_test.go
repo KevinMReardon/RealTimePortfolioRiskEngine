@@ -94,6 +94,52 @@ func TestValidateBriefingOutput_acceptsPlainTextFallback(t *testing.T) {
 	}
 }
 
+func TestValidateBriefingOutput_orderTypeAndTIFAlone_ok(t *testing.T) {
+	t.Parallel()
+	payload := `{
+	  "market_summary":"m",
+	  "portfolio_context":"p",
+	  "trade_ideas":[{"symbol":"AAPL","rationale":"r","confidence":0.5,"size":"s","stop":"st","target":"t","order_type":"market","time_in_force":"day"}],
+	  "risks_and_caveats":"r",
+	  "data_gaps":[],
+	  "disclaimer":"d",
+	  "used_sources":[],
+	  "used_fields":[]
+	}`
+	_, err := ValidateBriefingOutput([]byte(payload))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func TestValidateBriefingOutput_limitOrderTypeRequiresLimitPrice(t *testing.T) {
+	t.Parallel()
+	payload := `{
+	  "market_summary":"m",
+	  "portfolio_context":"p",
+	  "trade_ideas":[{"symbol":"AAPL","rationale":"r","confidence":0.5,"size":"s","stop":"st","target":"t","side":"BUY","quantity":"1","order_type":"limit"}],
+	  "risks_and_caveats":"r",
+	  "data_gaps":[],
+	  "disclaimer":"d",
+	  "used_sources":[],
+	  "used_fields":[]
+	}`
+	_, err := ValidateBriefingOutput([]byte(payload))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+	found := false
+	for _, issue := range ve.Issues {
+		if strings.Contains(issue.Field, "limit_price") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected limit_price issue, got %#v", ve.Issues)
+	}
+}
+
 func TestValidateBriefingOutput_structuredTrade_requiresSymbolSideQtyOrNotional(t *testing.T) {
 	t.Parallel()
 	payload := `{

@@ -74,7 +74,8 @@ func ValidateBriefingOutput(raw json.RawMessage) (BriefingOutput, error) {
 	raw = canonicalizeBriefingContract(raw)
 	var out BriefingOutput
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
+	// Canonical JSON already strips unknown keys; allow unknowns here so minor decoder/schema drift
+	// does not reject otherwise-valid briefings.
 	if err := dec.Decode(&out); err != nil {
 		return BriefingOutput{}, &ValidationError{
 			Issues: []ValidationIssue{{Code: ValidationCodeMalformedJSON, Detail: err.Error()}},
@@ -126,7 +127,7 @@ func ValidateBriefingOutput(raw json.RawMessage) (BriefingOutput, error) {
 		if idea.Confidence < 0 || idea.Confidence > 1 {
 			issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidConfidence, Field: prefix + ".confidence", Detail: "must be between 0 and 1 inclusive"})
 		}
-		if tradeIdeaHasAnyStructuredField(idea) {
+		if tradeIdeaHasStructuredOrderIntent(idea) {
 			sym := policy.NormalizeSymbol(strings.TrimSpace(idea.Symbol))
 			if sym == "" {
 				issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".symbol", Detail: "required when structured order fields are set"})
@@ -356,18 +357,33 @@ func normalizeTradeIdeas(v any) []map[string]any {
 	return out
 }
 
-func tradeIdeaHasAnyStructuredField(idea BriefingIdea) bool {
-	return strings.TrimSpace(idea.Side) != "" ||
+// tradeIdeaHasStructuredOrderIntent is true when the model signalled executable intent beyond
+// narrative-only hints. order_type / time_in_force alone do not trigger (models often emit
+// "market"/"day" without symbol/side/qty, which should not fail the whole briefing).
+func tradeIdeaHasStructuredOrderIntent(idea BriefingIdea) bool {
+	if strings.TrimSpace(idea.Side) != "" ||
 		strings.TrimSpace(idea.Quantity) != "" ||
 		strings.TrimSpace(idea.NotionalUSD) != "" ||
-		strings.TrimSpace(idea.OrderType) != "" ||
-		strings.TrimSpace(idea.LimitPrice) != "" ||
-		strings.TrimSpace(idea.TimeInForce) != ""
+		strings.TrimSpace(idea.LimitPrice) != "" {
+		return true
+	}
+	return orderTypeImpliesLimit(idea.OrderType)
 }
 
 func orderTypeImpliesLimit(orderType string) bool {
 	s := strings.ToLower(strings.TrimSpace(orderType))
-	return s != "" && strings.Contains(s, "limit")
+	if s == "" {
+		return false
+	}
+	// Tokenize on non-alphanumeric so "stop_limit" matches, "unlimited" does not.
+	for _, tok := range strings.FieldsFunc(s, func(r rune) bool {
+		return r < '0' || r > '9' && (r < 'a' || r > 'z')
+	}) {
+		if tok == "limit" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRisksAndCaveats(v any) string {

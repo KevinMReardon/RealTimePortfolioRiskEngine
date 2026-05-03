@@ -22,6 +22,16 @@ func TestRedactJSON_RedactsSecretKeysAndBearerValues(t *testing.T) {
 	}
 }
 
+func TestRedactJSON_nonJSONInputIsValidJSON(t *testing.T) {
+	t.Parallel()
+	in := json.RawMessage(`not json at all {`)
+	out := redactJSON(in)
+	var v any
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("redactJSON must emit valid JSON for jsonb: %v out=%q", err, string(out))
+	}
+}
+
 func TestRedactText_RedactsKeyValueTokens(t *testing.T) {
 	t.Parallel()
 	in := "token=shh123 api_key:abcd bearer aaa.bbb.ccc"

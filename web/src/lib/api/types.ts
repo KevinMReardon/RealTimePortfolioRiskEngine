@@ -228,6 +228,25 @@ export type BriefingCreateRequestOptions = {
   run_date?: string;
 };
 
+export type ProposalDTO = {
+  proposal_id: UUID;
+  portfolio_id: UUID;
+  agent_session_id?: UUID | null;
+  trade_idea_index?: number | null;
+  symbol: string;
+  side: string;
+  status: string;
+  row_version: number;
+  payload_hash: string;
+  policy_inputs_hash: string;
+  policy_config_hash: string;
+  rationale_snapshot?: string | null;
+};
+
+export type ListProposalsResponse = {
+  proposals: ProposalDTO[];
+};
+
 export type AgentSessionDTO = {
   SessionID: string;
   PortfolioID: string;

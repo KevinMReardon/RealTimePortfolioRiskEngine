@@ -59,6 +59,7 @@ func run() error {
 	defer workerCancel()
 
 	repo := events.NewPostgresStore(dbPool)
+	repo.SetLogger(logger)
 
 	var proposalStore *proposals.Store
 	if cfg.ProposalsRuntimeEnabled() {

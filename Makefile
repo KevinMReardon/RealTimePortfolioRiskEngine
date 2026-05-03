@@ -1,7 +1,6 @@
 SHELL := /bin/sh
 
 MIGRATIONS_DIR := migrations
-DATABASE_URL ?= $(DATABASE_URL)
 
 .PHONY: run test test-integration build migrate-up migrate-down db-reset
 

@@ -125,15 +125,18 @@ func (r *PriceIngestor) runTick(ctx context.Context) error {
 		}
 		return err
 	}
-	ingestedCount := 0
+	insertedCount := 0
+	duplicateCount := 0
 	droppedStaleCount := 0
 	dedupSkippedCount := 0
+	emitFailedCount := 0
 	for _, q := range res.Quotes {
-		ingested, droppedStale, dedupSkipped, err := r.emitQuote(ctx, providerName, q)
+		inserted, duplicate, droppedStale, dedupSkipped, err := r.emitQuote(ctx, providerName, q)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
+			emitFailedCount++
 			if r.log != nil {
 				r.log.Warn("price_feed_emit_failed",
 					zap.String("provider", providerName),
@@ -144,8 +147,11 @@ func (r *PriceIngestor) runTick(ctx context.Context) error {
 			// Continue processing remaining quotes.
 			continue
 		}
-		if ingested {
-			ingestedCount++
+		if inserted {
+			insertedCount++
+		}
+		if duplicate {
+			duplicateCount++
 		}
 		if droppedStale {
 			droppedStaleCount++
@@ -154,8 +160,8 @@ func (r *PriceIngestor) runTick(ctx context.Context) error {
 			dedupSkippedCount++
 		}
 	}
-	if ingestedCount > 0 {
-		observability.AddPriceFeedSymbolsIngested(providerName, ingestedCount)
+	if insertedCount > 0 {
+		observability.AddPriceFeedSymbolsIngested(providerName, insertedCount)
 	}
 	if droppedStaleCount > 0 {
 		observability.AddPriceFeedDroppedStaleQuotes(providerName, droppedStaleCount)
@@ -176,7 +182,34 @@ func (r *PriceIngestor) runTick(ctx context.Context) error {
 		}
 	}
 	if r.cfg.Runtime != nil {
-		r.cfg.Runtime.OnTickSuccess(time.Now().UTC(), providerName, usedFailover, ingestedCount)
+		r.cfg.Runtime.OnTickSuccess(time.Now().UTC(), providerName, usedFailover, insertedCount)
+	}
+	if r.log != nil {
+		reason := "all_quotes_inserted"
+		switch {
+		case insertedCount == 0 && duplicateCount > 0 && dedupSkippedCount == 0 && droppedStaleCount == 0 && emitFailedCount == 0:
+			reason = "all_quotes_duplicate_idempotent"
+		case insertedCount == 0 && dedupSkippedCount > 0 && droppedStaleCount == 0 && emitFailedCount == 0 && duplicateCount == 0:
+			reason = "all_quotes_skipped_dedup"
+		case insertedCount == 0 && droppedStaleCount > 0 && dedupSkippedCount == 0 && emitFailedCount == 0 && duplicateCount == 0:
+			reason = "all_quotes_skipped_stale"
+		case insertedCount == 0 && emitFailedCount > 0 && dedupSkippedCount == 0 && droppedStaleCount == 0 && duplicateCount == 0:
+			reason = "all_quotes_emit_failed"
+		case insertedCount == 0:
+			reason = "no_quotes_inserted_mixed_reasons"
+		case duplicateCount > 0 || dedupSkippedCount > 0 || droppedStaleCount > 0 || emitFailedCount > 0:
+			reason = "partial_insert_with_duplicates_or_skips_or_errors"
+		}
+		r.log.Info("price_feed_tick_result",
+			zap.String("provider", providerName),
+			zap.Int("fetched_quotes", len(res.Quotes)),
+			zap.Int("inserted_quotes", insertedCount),
+			zap.Int("duplicate_quotes", duplicateCount),
+			zap.Int("dedup_skipped_quotes", dedupSkippedCount),
+			zap.Int("stale_skipped_quotes", droppedStaleCount),
+			zap.Int("emit_failed_quotes", emitFailedCount),
+			zap.String("result_reason", reason),
+		)
 	}
 	return nil
 }
@@ -298,21 +331,33 @@ func (r *PriceIngestor) sleepBackoff(ctx context.Context, attempt int) error {
 	}
 }
 
-func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pricesource.PriceQuote) (bool, bool, bool, error) {
+func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pricesource.PriceQuote) (bool, bool, bool, bool, error) {
 	symbol, err := pricesource.NormalizeToInternalSymbol(q.Symbol)
 	if err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	partition, err := config.PricePartitionForSymbol(r.cfg.PriceStreamPartitions, symbol)
 	if err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	asOf := q.AsOf.UTC()
 	if asOf.IsZero() {
 		asOf = time.Now().UTC()
 	}
-	if r.shouldDedup(symbol, q.Price, asOf) {
-		return false, false, true, nil
+	if dedup, prev := r.shouldDedup(symbol, q.Price, asOf); dedup {
+		if r.log != nil {
+			r.log.Info("price_feed_quote_skipped",
+				zap.String("provider", providerName),
+				zap.String("symbol", symbol),
+				zap.String("reason", "dedup_window_unchanged_price"),
+				zap.String("incoming_price", q.Price.String()),
+				zap.Time("incoming_as_of", asOf),
+				zap.String("previous_price", prev.price.String()),
+				zap.Time("previous_as_of", prev.lastSeen),
+				zap.Duration("dedup_window", r.cfg.DedupWindow),
+			)
+		}
+		return false, false, false, true, nil
 	}
 	seq := r.nextMonotonicSequence(symbol, q.SourceSequence)
 	payload := domain.PricePayload{
@@ -323,7 +368,7 @@ func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pr
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	source := fmt.Sprintf("%s:%s", r.cfg.SourcePrefix, providerName)
 	event := domain.EventEnvelope{
@@ -336,28 +381,41 @@ func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pr
 		IdempotencyKey: r.idempotencyKey(providerName, symbol, asOf),
 		Payload:        payloadJSON,
 	}
-	_, err = r.svc.Ingest(ctx, event)
+	appendRes, err := r.svc.Ingest(ctx, event)
 	if err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
+	}
+	if !appendRes.Inserted {
+		if r.log != nil {
+			r.log.Info("price_feed_quote_skipped",
+				zap.String("provider", providerName),
+				zap.String("symbol", symbol),
+				zap.String("reason", "duplicate_idempotency_key"),
+				zap.String("idempotency_key", event.IdempotencyKey),
+				zap.Time("incoming_as_of", asOf),
+				zap.String("incoming_price", q.Price.String()),
+			)
+		}
+		return false, true, false, false, nil
 	}
 	r.recordDedup(symbol, q.Price, asOf)
-	return true, false, false, nil
+	return true, false, false, false, nil
 }
 
-func (r *PriceIngestor) shouldDedup(symbol string, price decimal.Decimal, asOf time.Time) bool {
+func (r *PriceIngestor) shouldDedup(symbol string, price decimal.Decimal, asOf time.Time) (bool, dedupState) {
 	if r.cfg.DedupWindow <= 0 {
-		return false
+		return false, dedupState{}
 	}
 	r.dedupMu.Lock()
 	defer r.dedupMu.Unlock()
 	prev, ok := r.dedup[symbol]
 	if !ok {
-		return false
+		return false, dedupState{}
 	}
 	if asOf.Sub(prev.lastSeen) > r.cfg.DedupWindow {
-		return false
+		return false, dedupState{}
 	}
-	return prev.price.Equal(price)
+	return prev.price.Equal(price), prev
 }
 
 func (r *PriceIngestor) recordDedup(symbol string, price decimal.Decimal, asOf time.Time) {

@@ -115,10 +115,10 @@ func TestEmitQuote_MonotonicSourceSequenceAndIdempotencyKey(t *testing.T) {
 	q2 := q1
 	q2.SourceSequence = 9 // lower than prior, should be bumped
 
-	if _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q1); err != nil {
+	if _, _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q1); err != nil {
 		t.Fatalf("emitQuote q1: %v", err)
 	}
-	if _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q2); err != nil {
+	if _, _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q2); err != nil {
 		t.Fatalf("emitQuote q2: %v", err)
 	}
 	if len(rec.events) != 2 {
@@ -166,12 +166,12 @@ func TestEmitQuote_AllowsOlderQuoteWhenItCanAdvanceProjection(t *testing.T) {
 		AsOf:           time.Now().UTC().Add(-10 * time.Minute),
 		SourceSequence: 1,
 	}
-	ingested, droppedStale, dedupSkipped, err := runner.emitQuote(t.Context(), "twelvedata", q)
+	inserted, duplicate, droppedStale, dedupSkipped, err := runner.emitQuote(t.Context(), "twelvedata", q)
 	if err != nil {
 		t.Fatalf("emitQuote: %v", err)
 	}
-	if !ingested || dedupSkipped {
-		t.Fatalf("expected ingest without dedup, ingested=%v dedup=%v", ingested, dedupSkipped)
+	if !inserted || dedupSkipped || duplicate {
+		t.Fatalf("expected inserted without dedup/duplicate, inserted=%v dedup=%v duplicate=%v", inserted, dedupSkipped, duplicate)
 	}
 	if droppedStale {
 		t.Fatalf("expected droppedStale=false")
@@ -207,15 +207,15 @@ func TestEmitQuote_DedupSkipsUnchangedPrice(t *testing.T) {
 	q2 := q1
 	q2.AsOf = base.Add(10 * time.Second)
 
-	if _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q1); err != nil {
+	if _, _, _, _, err := runner.emitQuote(t.Context(), "twelvedata", q1); err != nil {
 		t.Fatalf("emitQuote q1: %v", err)
 	}
-	ingested, droppedStale, dedupSkipped, err := runner.emitQuote(t.Context(), "twelvedata", q2)
+	inserted, duplicate, droppedStale, dedupSkipped, err := runner.emitQuote(t.Context(), "twelvedata", q2)
 	if err != nil {
 		t.Fatalf("emitQuote q2: %v", err)
 	}
-	if ingested || droppedStale {
-		t.Fatalf("expected dedup skip only, ingested=%v stale=%v", ingested, droppedStale)
+	if inserted || droppedStale || duplicate {
+		t.Fatalf("expected dedup skip only, inserted=%v stale=%v duplicate=%v", inserted, droppedStale, duplicate)
 	}
 	if !dedupSkipped {
 		t.Fatalf("expected dedupSkipped=true")
