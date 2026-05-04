@@ -103,17 +103,56 @@ func ptrTimeRFC3339(t *time.Time) *string {
 	return &v
 }
 
-func dataStatusFromStaleness(staleAfter, staleness float64) string {
-	if staleAfter <= 0 {
-		return "unknown"
+// PriceListStaleAfter is how long prices_projection.updated_at may age before rows look
+// stale. Long poll intervals use a higher floor because updated_at does not move when the
+// provider returns the same idempotency bucket on every tick.
+func PriceListStaleAfter(pollInterval time.Duration) time.Duration {
+	if pollInterval <= 0 {
+		return 15 * time.Minute
 	}
-	if staleness <= staleAfter {
-		return "fresh"
+	staleAfter := 3 * pollInterval
+	if floor := 5 * pollInterval; floor > staleAfter {
+		staleAfter = floor
 	}
-	return "stale"
+	return staleAfter
 }
 
-func listPricesHandler(store PriceMarksReader, log *zap.Logger, staleAfter time.Duration) gin.HandlerFunc {
+// providerDataStatus drives the UI badge. Rows use projection updated_at, which does not
+// advance when the feed dedupes identical provider snapshots (same idempotency bucket).
+// In that case staleness grows even while LastSuccessfulFetch is recent; we treat the row
+// as fresh only when we are barely past the threshold and a poll succeeded recently.
+func providerDataStatus(
+	staleAfterSec, projectionStalenessSec float64,
+	rt *pricefeed.RuntimeTracker,
+	pollInterval time.Duration,
+) string {
+	if staleAfterSec <= 0 {
+		return "unknown"
+	}
+	if projectionStalenessSec <= staleAfterSec {
+		return "fresh"
+	}
+	if rt == nil || pollInterval <= 0 {
+		return "stale"
+	}
+	over := projectionStalenessSec - staleAfterSec
+	if over > float64((2 * pollInterval).Seconds()) {
+		return "stale"
+	}
+	snap := rt.Snapshot()
+	if snap.LastSuccessAt == nil || time.Since(*snap.LastSuccessAt) > 2*pollInterval {
+		return "stale"
+	}
+	return "fresh"
+}
+
+func listPricesHandler(
+	store PriceMarksReader,
+	log *zap.Logger,
+	staleAfter time.Duration,
+	pollInterval time.Duration,
+	rt *pricefeed.RuntimeTracker,
+) gin.HandlerFunc {
 	staleSec := staleAfter.Seconds()
 	return func(c *gin.Context) {
 		q := strings.TrimSpace(c.Query("q"))
@@ -150,7 +189,7 @@ func listPricesHandler(store PriceMarksReader, log *zap.Logger, staleAfter time.
 				UpdatedAt:          row.UpdatedAt.UTC().Format(time.RFC3339Nano),
 				Source:             row.Source,
 				StalenessSeconds:   st,
-				ProviderDataStatus: dataStatusFromStaleness(staleSec, st),
+				ProviderDataStatus: providerDataStatus(staleSec, st, rt, pollInterval),
 			})
 		}
 		c.JSON(http.StatusOK, listPricesResponse{
@@ -162,7 +201,13 @@ func listPricesHandler(store PriceMarksReader, log *zap.Logger, staleAfter time.
 	}
 }
 
-func getPriceSymbolHandler(store PriceMarksReader, log *zap.Logger, staleAfter time.Duration) gin.HandlerFunc {
+func getPriceSymbolHandler(
+	store PriceMarksReader,
+	log *zap.Logger,
+	staleAfter time.Duration,
+	pollInterval time.Duration,
+	rt *pricefeed.RuntimeTracker,
+) gin.HandlerFunc {
 	staleSec := staleAfter.Seconds()
 	return func(c *gin.Context) {
 		symbol := strings.TrimSpace(c.Param("symbol"))
@@ -201,7 +246,7 @@ func getPriceSymbolHandler(store PriceMarksReader, log *zap.Logger, staleAfter t
 			History:            hist,
 			HistorySummary:     summarizeHistory(detail.History),
 			StalenessSeconds:   st,
-			ProviderDataStatus: dataStatusFromStaleness(staleSec, st),
+			ProviderDataStatus: providerDataStatus(staleSec, st, rt, pollInterval),
 		})
 	}
 }
@@ -233,10 +278,7 @@ func getPriceFeedStatusHandler(
 	poll time.Duration,
 	watchlistMgr PriceFeedWatchlistManager,
 ) gin.HandlerFunc {
-	staleAfter := 3 * poll
-	if poll <= 0 {
-		staleAfter = 5 * time.Minute
-	}
+	staleAfter := PriceListStaleAfter(poll)
 	return func(c *gin.Context) {
 		watchlist := []string(nil)
 		if watchlistMgr != nil {

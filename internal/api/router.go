@@ -145,12 +145,21 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		read.POST("/portfolios/:id/scenarios", postScenarioHandler(cfg.ReadPortfolio, logger, cfg.PriceStreamPartitions))
 		read.POST("/portfolios/:id/insights/explain", postInsightsExplainHandler(cfg.ReadPortfolio, cfg.RiskRead, cfg.Insights, logger, cfg.PriceStreamPartitions, cfg.RiskSigmaWindowN))
 		if cfg.PriceMarksRead != nil {
-			staleAfter := 3 * cfg.PriceFeedPollInterval
-			if staleAfter <= 0 {
-				staleAfter = 15 * time.Minute
-			}
-			read.GET("/prices", listPricesHandler(cfg.PriceMarksRead, logger, staleAfter))
-			read.GET("/prices/:symbol", getPriceSymbolHandler(cfg.PriceMarksRead, logger, staleAfter))
+			staleAfter := PriceListStaleAfter(cfg.PriceFeedPollInterval)
+			read.GET("/prices", listPricesHandler(
+				cfg.PriceMarksRead,
+				logger,
+				staleAfter,
+				cfg.PriceFeedPollInterval,
+				cfg.PriceFeedRuntime,
+			))
+			read.GET("/prices/:symbol", getPriceSymbolHandler(
+				cfg.PriceMarksRead,
+				logger,
+				staleAfter,
+				cfg.PriceFeedPollInterval,
+				cfg.PriceFeedRuntime,
+			))
 			read.GET("/price-feed/status", getPriceFeedStatusHandler(
 				cfg.PriceFeedRuntime,
 				cfg.PriceFeedEnabled,

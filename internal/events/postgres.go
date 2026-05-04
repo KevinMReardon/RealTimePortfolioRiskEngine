@@ -1697,6 +1697,7 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return fmt.Errorf("%w: price payload: %v", domain.ErrInvalidPayload, err)
 		}
+		markAsOf := p.MarkAsOfTime(ev.EventTime)
 		var existingAsOf time.Time
 		var existingPriceText string
 		existingFound := false
@@ -1723,7 +1724,7 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 				updated_at = NOW(),
 				as_of_event_id = EXCLUDED.as_of_event_id
 			WHERE EXCLUDED.as_of > prices_projection.as_of
-		`, p.Symbol, p.Price.String(), ev.EventTime, ev.EventID)
+		`, p.Symbol, p.Price.String(), markAsOf, ev.EventID)
 		if err != nil {
 			return fmt.Errorf("upsert prices_projection %s: %w", p.Symbol, err)
 		}
@@ -1736,13 +1737,13 @@ func (s *PostgresStore) ApplyPriceBatch(ctx context.Context, streamPortfolioID u
 				zap.String("symbol", p.Symbol),
 				zap.String("reason", "incoming_as_of_not_newer"),
 				zap.String("incoming_price", p.Price.String()),
-				zap.Time("incoming_as_of", ev.EventTime.UTC()),
+				zap.Time("incoming_as_of", markAsOf.UTC()),
 				zap.String("existing_price", existingPriceText),
 				zap.Time("existing_as_of", existingAsOf.UTC()),
 				zap.String("event_id", ev.EventID.String()),
 			)
 		}
-		if err := upsertSymbolReturn(ctx, tx, p.Symbol, p.Price, ev.EventTime, ev.EventID); err != nil {
+		if err := upsertSymbolReturn(ctx, tx, p.Symbol, p.Price, markAsOf, ev.EventID); err != nil {
 			return fmt.Errorf("upsert symbol_returns %s: %w", p.Symbol, err)
 		}
 		if err := trimSymbolReturnsWindow(ctx, tx, p.Symbol, symbolReturnsWindowN); err != nil {

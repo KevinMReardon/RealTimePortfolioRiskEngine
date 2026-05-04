@@ -135,12 +135,18 @@ func TestEmitQuote_MonotonicSourceSequenceAndIdempotencyKey(t *testing.T) {
 	if p1.Symbol != "EUR-USD" || p2.Symbol != "EUR-USD" {
 		t.Fatalf("normalized symbol mismatch: %q / %q", p1.Symbol, p2.Symbol)
 	}
+	if !p1.AsOf.Equal(asOf) {
+		t.Fatalf("payload as_of got %v want %v", p1.AsOf, asOf)
+	}
 	if p2.SourceSequence <= p1.SourceSequence {
 		t.Fatalf("source sequence not monotonic: p1=%d p2=%d", p1.SourceSequence, p2.SourceSequence)
 	}
 	wantIdem := "twelvedata:EUR-USD:1710000000"
 	if rec.events[0].IdempotencyKey != wantIdem {
 		t.Fatalf("idempotency key got %q want %q", rec.events[0].IdempotencyKey, wantIdem)
+	}
+	if rec.events[0].EventTime.Equal(asOf) {
+		t.Fatalf("expected EventTime to use ingest ordering, not quote as_of")
 	}
 }
 

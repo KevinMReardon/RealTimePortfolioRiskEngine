@@ -55,7 +55,7 @@ func TestListPrices_contract(t *testing.T) {
 		},
 	}
 	r := gin.New()
-	r.GET("/v1/prices", listPricesHandler(store, zap.NewNop(), 5*time.Minute))
+	r.GET("/v1/prices", listPricesHandler(store, zap.NewNop(), 5*time.Minute, time.Minute, nil))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/prices?limit=10&offset=0&sort=symbol&order=asc", nil)
 	rec := httptest.NewRecorder()
@@ -98,6 +98,42 @@ func TestGetPriceFeedStatus_contract(t *testing.T) {
 	}
 	if !body.FeedEnabled || body.WatchlistCount != 2 || !body.LastTickUsedFailover {
 		t.Fatalf("unexpected %+v", body)
+	}
+	if body.StaleAfterSeconds != PriceListStaleAfter(time.Minute).Seconds() {
+		t.Fatalf("staleness_threshold_seconds got %v want %v", body.StaleAfterSeconds, PriceListStaleAfter(time.Minute).Seconds())
+	}
+}
+
+func TestPriceListStaleAfter(t *testing.T) {
+	t.Parallel()
+	if got := PriceListStaleAfter(0); got != 15*time.Minute {
+		t.Fatalf("poll 0: got %v", got)
+	}
+	if got := PriceListStaleAfter(time.Minute); got != 5*time.Minute {
+		t.Fatalf("poll 1m: got %v want 5m", got)
+	}
+	if got := PriceListStaleAfter(900 * time.Second); got != 75*time.Minute {
+		t.Fatalf("poll 900s: got %v want 75m", got)
+	}
+}
+
+func TestProviderDataStatus_duplicateTickRescue(t *testing.T) {
+	t.Parallel()
+	poll := 900 * time.Second
+	staleSec := PriceListStaleAfter(poll).Seconds()
+	rt := pricefeed.NewRuntimeTracker()
+	rt.OnTickSuccess(time.Now().UTC(), "alpaca", false, 0)
+
+	slightlyPast := staleSec + 50
+	if providerDataStatus(staleSec, slightlyPast, rt, poll) != "fresh" {
+		t.Fatalf("expected fresh when barely past threshold and fetch ok")
+	}
+	tooFarPast := staleSec + float64((2*poll).Seconds()) + 10
+	if providerDataStatus(staleSec, tooFarPast, rt, poll) != "stale" {
+		t.Fatalf("expected stale when projection age exceeds rescue band")
+	}
+	if providerDataStatus(staleSec, slightlyPast, nil, poll) != "stale" {
+		t.Fatalf("expected stale without runtime tracker")
 	}
 }
 

@@ -365,6 +365,7 @@ func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pr
 		Price:          q.Price,
 		Currency:       q.Currency,
 		SourceSequence: seq,
+		AsOf:           asOf,
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -374,7 +375,7 @@ func (r *PriceIngestor) emitQuote(ctx context.Context, providerName string, q pr
 	event := domain.EventEnvelope{
 		EventID:        uuid.New(),
 		EventType:      domain.EventTypePriceUpdated,
-		EventTime:      asOf,
+		EventTime:      time.Now().UTC(),
 		ProcessingTime: time.Now().UTC(),
 		Source:         source,
 		PortfolioID:    partition.String(),
