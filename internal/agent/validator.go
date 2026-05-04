@@ -10,6 +10,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
@@ -151,8 +152,11 @@ func ValidateBriefingOutput(raw json.RawMessage) (BriefingOutput, error) {
 				}
 			}
 			if hasNotional {
-				if _, err := decimal.NewFromString(strings.TrimSpace(idea.NotionalUSD)); err != nil {
+				n, err := decimal.NewFromString(strings.TrimSpace(idea.NotionalUSD))
+				if err != nil {
 					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".notional_usd", Detail: "must be a decimal number"})
+				} else if n.LessThan(alpaca.MinNotionalStockOrderUSD) {
+					issues = append(issues, ValidationIssue{Code: ValidationCodeInvalidTradeIdea, Field: prefix + ".notional_usd", Detail: "must be at least 1.00 USD (broker minimum for notional orders)"})
 				}
 			}
 			if orderTypeImpliesLimit(idea.OrderType) {

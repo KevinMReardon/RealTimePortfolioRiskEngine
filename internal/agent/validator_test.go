@@ -140,6 +140,35 @@ func TestValidateBriefingOutput_limitOrderTypeRequiresLimitPrice(t *testing.T) {
 	}
 }
 
+func TestValidateBriefingOutput_notionalBelowOneDollarFails(t *testing.T) {
+	t.Parallel()
+	payload := `{
+	  "market_summary":"m",
+	  "portfolio_context":"p",
+	  "trade_ideas":[{"rationale":"r","confidence":0.5,"size":"s","stop":"st","target":"t","symbol":"AAPL","side":"BUY","quantity":"","notional_usd":"0.50","order_type":"market","time_in_force":"day"}],
+	  "risks_and_caveats":"r",
+	  "data_gaps":[],
+	  "disclaimer":"d",
+	  "used_sources":[],
+	  "used_fields":[]
+	}`
+	_, err := ValidateBriefingOutput([]byte(payload))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+	found := false
+	for _, issue := range ve.Issues {
+		if strings.Contains(issue.Field, "notional_usd") && issue.Code == ValidationCodeInvalidTradeIdea {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected notional_usd issue, got %#v", ve.Issues)
+	}
+}
+
 func TestValidateBriefingOutput_structuredTrade_requiresSymbolSideQtyOrNotional(t *testing.T) {
 	t.Parallel()
 	payload := `{

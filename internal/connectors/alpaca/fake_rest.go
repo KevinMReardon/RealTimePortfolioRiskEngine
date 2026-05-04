@@ -3,6 +3,9 @@ package alpaca
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // FakeREST is a test double implementing REST with static responses.
@@ -16,6 +19,9 @@ type FakeREST struct {
 	GetAccountErr      error
 	ListOrdersErr      error
 	ActivitiesCallIdx  int
+	PlaceOrderFunc       func(ctx context.Context, in PlaceOrderInput) (OrderSnapshot, error)
+	PlaceOrderErr        error
+	lastPlaceOrderInput PlaceOrderInput
 }
 
 // GetAccount implements REST.
@@ -68,4 +74,35 @@ func (f *FakeREST) ListOrders(ctx context.Context, req ListOrdersRequest) ([]Ord
 		return nil, f.ListOrdersErr
 	}
 	return f.Orders, nil
+}
+
+// LastPlaceOrderInput returns the last PlaceOrder input (for tests); zero value if never called.
+func (f *FakeREST) LastPlaceOrderInput() PlaceOrderInput {
+	return f.lastPlaceOrderInput
+}
+
+// PlaceOrder implements REST.
+func (f *FakeREST) PlaceOrder(ctx context.Context, in PlaceOrderInput) (OrderSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return OrderSnapshot{}, err
+	}
+	if f.PlaceOrderFunc != nil {
+		return f.PlaceOrderFunc(ctx, in)
+	}
+	if f.PlaceOrderErr != nil {
+		return OrderSnapshot{}, f.PlaceOrderErr
+	}
+	f.lastPlaceOrderInput = in
+	return OrderSnapshot{
+		ID:             "fake-order-" + uuid.New().String(),
+		ClientOrderID:  in.ClientOrderID,
+		Symbol:         in.Symbol,
+		Side:           in.Side,
+		Type:           in.OrderType,
+		Status:         "accepted",
+		TimeInForce:    in.TimeInForce,
+		SubmittedAt:    time.Now().UTC(),
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
+	}, nil
 }

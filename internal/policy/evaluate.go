@@ -17,6 +17,13 @@ var (
 // Evaluate runs deterministic rules in fixed order and aggregates violations.
 // Kill-switch semantics: Env OR DB active counts as blocked (OR).
 func Evaluate(intent Intent, snap Snapshot, cfg Config) Decision {
+	d := evaluateCore(intent, snap, cfg)
+	observePolicyEvaluationResult(d, snap)
+	return d
+}
+
+// evaluateCore is the rule engine without telemetry (see Evaluate / EvaluateForBrokerSubmit).
+func evaluateCore(intent Intent, snap Snapshot, cfg Config) Decision {
 	out := Decision{
 		PolicyConfigHash: PolicyConfigHash(cfg),
 		InputsHash:       InputsHash(intent, snap),
@@ -255,6 +262,10 @@ func Evaluate(intent Intent, snap Snapshot, cfg Config) Decision {
 		out.EffectiveOutcome = OutcomeAllow
 	}
 
+	return out
+}
+
+func observePolicyEvaluationResult(out Decision, snap Snapshot) {
 	primaryRule := "none"
 	if len(out.Violations) > 0 {
 		primaryRule = out.Violations[0].Code
@@ -269,8 +280,6 @@ func Evaluate(intent Intent, snap Snapshot, cfg Config) Decision {
 		}
 	}
 	observability.ObservePolicyEvaluation(string(out.EffectiveOutcome), primaryRule, killBlocked, ksSrc)
-
-	return out
 }
 
 func killSwitchSource(snap Snapshot) string {

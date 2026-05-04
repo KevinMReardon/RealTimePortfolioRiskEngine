@@ -80,8 +80,15 @@ export function useDenyProposalMutation(portfolioId: string) {
 export function useSubmitProposalMutation(portfolioId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { proposalId: string }) =>
-      submitProposal(portfolioId, input.proposalId),
+    mutationFn: (input: {
+      proposalId: string;
+      payloadHash: string;
+      rowVersion: number;
+    }) =>
+      submitProposal(portfolioId, input.proposalId, {
+        payload_hash: input.payloadHash,
+        row_version: input.rowVersion,
+      }),
     onSuccess: async () => {
       await invalidateProposalReads(qc, portfolioId);
     },

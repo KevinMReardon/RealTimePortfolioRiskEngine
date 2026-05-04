@@ -96,10 +96,10 @@ var (
 		Name: "proposed_trade_transitions_total",
 		Help: "Proposed trade status transitions (e.g. insert, approve, deny).",
 	}, []string{"from", "to"})
-	proposalSubmitNotImplementedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "proposal_submit_not_implemented_total",
-		Help: "Calls to proposal submit endpoint (execution not implemented).",
-	})
+	proposalSubmitOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "proposal_submit_outcomes_total",
+		Help: "POST /proposals/:id/submit outcomes (success, policy_denied, broker errors, etc.).",
+	}, []string{"outcome"})
 )
 
 func ensureMetricsRegistered() {
@@ -125,7 +125,7 @@ func ensureMetricsRegistered() {
 			policyEvaluationsTotal,
 			policyKillSwitchBlocksTotal,
 			proposedTradeTransitionsTotal,
-			proposalSubmitNotImplementedTotal,
+			proposalSubmitOutcomesTotal,
 		)
 		projectionLagSeconds.WithLabelValues("trade").Set(0)
 		projectionLagSeconds.WithLabelValues("price").Set(0)
@@ -289,8 +289,11 @@ func IncProposedTradeTransition(fromStatus, toStatus string) {
 	proposedTradeTransitionsTotal.WithLabelValues(fromStatus, toStatus).Inc()
 }
 
-// IncProposalSubmitNotImplemented records a hit on the stub submit endpoint.
-func IncProposalSubmitNotImplemented() {
+// ObserveProposalSubmit records a proposal submit HTTP outcome category.
+func ObserveProposalSubmit(outcome string) {
 	ensureMetricsRegistered()
-	proposalSubmitNotImplementedTotal.Inc()
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	proposalSubmitOutcomesTotal.WithLabelValues(outcome).Inc()
 }

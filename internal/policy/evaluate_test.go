@@ -438,6 +438,82 @@ func TestPolicyConfigHash_stable(t *testing.T) {
 	}
 }
 
+func TestEvaluateForBrokerSubmit_waives_soft_risk_limits(t *testing.T) {
+	c := baseCfg()
+	c.MaxPositionPct = decimal.RequireFromString("10")
+	i := policy.Intent{
+		Symbol:      "AAPL",
+		Side:        domain.SideBuy,
+		Quantity:    qty("1000"),
+		OrderType:   "market",
+		TimeInForce: "day",
+	}
+	s := policy.Snapshot{
+		PortfolioEquity:     decimal.RequireFromString("100000"),
+		PositionQtyBySymbol: map[string]decimal.Decimal{},
+		MarkPriceBySymbol:   map[string]decimal.Decimal{"AAPL": decimal.RequireFromString("50")},
+		NowNY:               wednesdaySession(t),
+		EquityAnchor:        decimal.RequireFromString("100000"),
+	}
+	full := policy.Evaluate(i, s, c)
+	if full.StrictOutcome != policy.OutcomeDeny || !containsCode(full.Violations, policy.RuleMaxPositionPct) {
+		t.Fatalf("full evaluate should deny on position pct: %v", policy.CompactViolationSummary(full.Violations))
+	}
+	br := policy.EvaluateForBrokerSubmit(i, s, c)
+	if br.StrictOutcome != policy.OutcomeAllow || len(br.Violations) != 0 {
+		t.Fatalf("broker submit should allow (no hard gates): violations=%v", policy.CompactViolationSummary(br.Violations))
+	}
+}
+
+func TestEvaluateForBrokerSubmit_allows_outside_US_regular_session(t *testing.T) {
+	c := baseCfg()
+	i := policy.Intent{
+		Symbol:      "AAPL",
+		Side:        domain.SideBuy,
+		Quantity:    qty("1"),
+		OrderType:   "market",
+		TimeInForce: "day",
+	}
+	s := policy.Snapshot{
+		PortfolioEquity:     decimal.RequireFromString("100000"),
+		PositionQtyBySymbol: map[string]decimal.Decimal{},
+		MarkPriceBySymbol:   map[string]decimal.Decimal{"AAPL": decimal.RequireFromString("100")},
+		NowNY:               saturday(t),
+		EquityAnchor:        decimal.RequireFromString("100000"),
+	}
+	full := policy.Evaluate(i, s, c)
+	if !containsCode(full.Violations, policy.RuleMarketHours) {
+		t.Fatalf("full evaluate should record MARKET_HOURS on weekend: %v", policy.CompactViolationSummary(full.Violations))
+	}
+	br := policy.EvaluateForBrokerSubmit(i, s, c)
+	if br.StrictOutcome != policy.OutcomeAllow || len(br.Violations) != 0 {
+		t.Fatalf("broker submit should not hard-block on session clock alone: %v", policy.CompactViolationSummary(br.Violations))
+	}
+}
+
+func TestEvaluateForBrokerSubmit_keeps_kill_switch(t *testing.T) {
+	c := baseCfg()
+	i := policy.Intent{
+		Symbol:      "AAPL",
+		Side:        domain.SideBuy,
+		Quantity:    qty("1"),
+		OrderType:   "market",
+		TimeInForce: "day",
+	}
+	s := policy.Snapshot{
+		PortfolioEquity:     decimal.RequireFromString("100000"),
+		PositionQtyBySymbol: map[string]decimal.Decimal{},
+		MarkPriceBySymbol:   map[string]decimal.Decimal{"AAPL": decimal.RequireFromString("100")},
+		NowNY:               wednesdaySession(t),
+		EquityAnchor:        decimal.RequireFromString("100000"),
+		KillSwitchEnv:       true,
+	}
+	br := policy.EvaluateForBrokerSubmit(i, s, c)
+	if br.EffectiveOutcome != policy.OutcomeDeny || !containsCode(br.Violations, policy.RuleKillSwitch) {
+		t.Fatalf("broker submit should still block kill switch: %v", policy.CompactViolationSummary(br.Violations))
+	}
+}
+
 func containsCode(vs []policy.Violation, code string) bool {
 	for _, v := range vs {
 		if v.Code == code {

@@ -151,6 +151,26 @@ func TestStore_proposal_lifecycle_and_anchors_integration(t *testing.T) {
 		t.Fatalf("row_version should bump: %d", after.RowVersion)
 	}
 
+	if err := store.MarkProposalSubmitted(ctx, SubmitSuccessParams{
+		PortfolioID:   portfolioID,
+		ProposalID:    p.ProposalID,
+		PayloadHash:   after.PayloadHash,
+		RowVersion:    after.RowVersion,
+		BrokerOrderID: "broker-order-int-1",
+	}); err != nil {
+		t.Fatalf("MarkProposalSubmitted: %v", err)
+	}
+	submitted, err := store.GetByIDForPortfolio(ctx, portfolioID, p.ProposalID)
+	if err != nil {
+		t.Fatalf("Get after submit: %v", err)
+	}
+	if submitted.Status != "submitted" {
+		t.Fatalf("after submit status = %q", submitted.Status)
+	}
+	if submitted.BrokerOrderID == nil || *submitted.BrokerOrderID != "broker-order-int-1" {
+		t.Fatalf("broker_order_id = %v", submitted.BrokerOrderID)
+	}
+
 	day := time.Date(2020, 2, 3, 0, 0, 0, 0, time.UTC)
 	if err := store.UpsertEquityAnchor(ctx, portfolioID, day, decimal.RequireFromString("100000")); err != nil {
 		t.Fatalf("UpsertEquityAnchor: %v", err)

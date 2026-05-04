@@ -242,6 +242,36 @@ func (s *PostgresStore) ListAlpacaSyncTargets(ctx context.Context) ([]AlpacaSync
 	return out, rows.Err()
 }
 
+// LoadPortfolioAlpacaKeyMaterial returns stored Alpaca REST credentials for a portfolio when non-empty keys exist.
+// ok is false when the portfolio row has no usable key pair (not an error).
+func (s *PostgresStore) LoadPortfolioAlpacaKeyMaterial(ctx context.Context, portfolioID uuid.UUID) (PortfolioAlpacaKeyMaterial, bool, error) {
+	var out PortfolioAlpacaKeyMaterial
+	var keyID, secret, baseURL sql.NullString
+	var mode string
+	err := s.pool.QueryRow(ctx, `
+		SELECT alpaca_account_mode,
+		       alpaca_key_id,
+		       alpaca_secret_key,
+		       alpaca_base_url
+		FROM portfolios
+		WHERE portfolio_id = $1
+	`, portfolioID).Scan(&mode, &keyID, &secret, &baseURL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PortfolioAlpacaKeyMaterial{}, false, nil
+		}
+		return PortfolioAlpacaKeyMaterial{}, false, fmt.Errorf("load portfolio alpaca keys: %w", err)
+	}
+	out.KeyID = strings.TrimSpace(keyID.String)
+	out.SecretKey = strings.TrimSpace(secret.String)
+	out.BaseURL = strings.TrimSpace(baseURL.String)
+	out.AccountMode = normalizeAlpacaMode(mode)
+	if out.KeyID == "" || out.SecretKey == "" {
+		return PortfolioAlpacaKeyMaterial{}, false, nil
+	}
+	return out, true, nil
+}
+
 func (s *PostgresStore) UpsertPortfolioAlpacaLink(ctx context.Context, portfolioID uuid.UUID, link AlpacaPortfolioLinkInput) error {
 	mode := normalizeAlpacaMode(link.AlpacaAccountMode)
 	keyID := strings.TrimSpace(link.AlpacaKeyID)

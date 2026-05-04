@@ -6,6 +6,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// MinNotionalStockOrderUSD is Alpaca's minimum USD notional for notional-sized US equity orders
+// (HTTP 422, code 42210000: "notional amount must be >= 1.00").
+var MinNotionalStockOrderUSD = decimal.RequireFromString("1")
+
 // AccountSummary is a read-only snapshot of account fields commonly used for sync and risk.
 type AccountSummary struct {
 	ID               string
@@ -85,6 +89,18 @@ type ListOrdersRequest struct {
 	Nested    bool
 	Side      string
 	Symbols   []string
+}
+
+// PlaceOrderInput is a minimal Alpaca POST /v2/orders request (equities; market or limit).
+type PlaceOrderInput struct {
+	Symbol        string
+	Side          string // BUY | SELL
+	Qty           *decimal.Decimal
+	NotionalUSD   *decimal.Decimal
+	OrderType     string // market | limit (empty defaults to market)
+	TimeInForce   string // day | gtc | ... (empty defaults to day)
+	LimitPrice    *decimal.Decimal
+	ClientOrderID string
 }
 
 // OrderSnapshot is a read-only view of an order.

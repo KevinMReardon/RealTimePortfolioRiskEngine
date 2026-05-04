@@ -40,11 +40,16 @@ export function denyProposal(
   );
 }
 
-export function submitProposal(portfolioId: string, proposalId: string) {
-  return apiFetch<{ status: string }>(
+export function submitProposal(
+  portfolioId: string,
+  proposalId: string,
+  body: ProposalVersionedInput,
+) {
+  return apiFetch<{ status: string; broker_order_id?: string; proposal_id?: string }>(
     `/v1/portfolios/${encodeURIComponent(portfolioId)}/proposals/${encodeURIComponent(proposalId)}/submit`,
     {
       method: "POST",
+      body: JSON.stringify(body),
     },
   );
 }

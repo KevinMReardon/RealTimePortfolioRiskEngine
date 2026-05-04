@@ -416,6 +416,8 @@ export function BriefingPage() {
                             onClick={() =>
                               submitProposalM.mutate({
                                 proposalId: proposal.proposal_id,
+                                payloadHash: proposal.payload_hash,
+                                rowVersion: proposal.row_version,
                               })
                             }
                           >

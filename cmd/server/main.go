@@ -380,7 +380,10 @@ func run() error {
 		AgentService:              agentSvc,
 		AgentMaxTokens:            cfg.AgentMaxTokens,
 		AgentTemperature:          cfg.AgentTemperature,
-		ProposalsStore:            proposalStore,
+		ProposalsStore:       proposalStore,
+		ProposalAlpacaKeys:   repo,
+		ProposalPolicy:       cfg.PolicyConfig(),
+		ProposalTradingHalt:  cfg.TradingHalt,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

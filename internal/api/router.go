@@ -12,6 +12,7 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 )
 
@@ -79,6 +80,12 @@ type RouterConfig struct {
 
 	// ProposalsStore enables Phase 2 proposal HTTP APIs when non-nil (typically PROPOSALS_ENABLED).
 	ProposalsStore *proposals.Store
+	// ProposalAlpacaKeys loads per-portfolio Alpaca API keys for proposal submit (typically *events.PostgresStore).
+	ProposalAlpacaKeys ProposalAlpacaKeyLoader
+	// ProposalPolicy is re-evaluated at submit time against current marks and broker snapshot.
+	ProposalPolicy policy.Config
+	// ProposalTradingHalt mirrors env kill-switch OR semantics with DB kill rows for submit-time policy.
+	ProposalTradingHalt bool
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -182,7 +189,15 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			read.GET("/portfolios/:id/proposals", getProposalsHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.POST("/portfolios/:id/proposals/:proposal_id/approve", postProposalApproveHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.POST("/portfolios/:id/proposals/:proposal_id/deny", postProposalDenyHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
-			read.POST("/portfolios/:id/proposals/:proposal_id/submit", postProposalSubmitHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions, logger))
+			read.POST("/portfolios/:id/proposals/:proposal_id/submit", postProposalSubmitHandler(
+				cfg.ProposalsStore,
+				cfg.ReadPortfolio,
+				cfg.PriceStreamPartitions,
+				cfg.ProposalAlpacaKeys,
+				cfg.ProposalPolicy,
+				cfg.ProposalTradingHalt,
+				logger,
+			))
 		}
 	}
 	if cfg.AuthStore != nil {

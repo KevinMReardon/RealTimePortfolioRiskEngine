@@ -81,6 +81,14 @@ type AlpacaPortfolioLinkInput struct {
 	AlpacaBaseURL     string
 }
 
+// PortfolioAlpacaKeyMaterial is server-side API key material for a portfolio (never returned on public GET APIs).
+type PortfolioAlpacaKeyMaterial struct {
+	KeyID       string
+	SecretKey   string
+	BaseURL     string
+	AccountMode string
+}
+
 type UserAccount struct {
 	UserID       uuid.UUID
 	DisplayName  string

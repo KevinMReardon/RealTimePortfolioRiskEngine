@@ -19,6 +19,9 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
+// ErrSubmitConflict means the proposal was not in approved state with the given payload_hash/row_version.
+var ErrSubmitConflict = errors.New("proposals: submit optimistic lock conflict")
+
 // Store is a Postgres-backed proposal + kill-switch + equity anchor helper.
 type Store struct {
 	pool *pgxpool.Pool
@@ -264,6 +267,86 @@ func (s *Store) DenyProposal(ctx context.Context, p DenyParams) error {
 			zap.String("proposal_id", p.ProposalID.String()),
 			zap.String("portfolio_id", p.PortfolioID.String()),
 			zap.String("denied_by_user_id", p.UserID.String()),
+		)
+	}
+	return nil
+}
+
+// SubmitSuccessParams finalizes an approved proposal after the broker accepts an order.
+type SubmitSuccessParams struct {
+	PortfolioID   uuid.UUID
+	ProposalID    uuid.UUID
+	PayloadHash   string
+	RowVersion    int
+	BrokerOrderID string
+}
+
+// MarkProposalSubmitted transitions approved → submitted when the broker order is accepted.
+func (s *Store) MarkProposalSubmitted(ctx context.Context, p SubmitSuccessParams) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	brokerID := strings.TrimSpace(p.BrokerOrderID)
+	if brokerID == "" {
+		return fmt.Errorf("proposals: broker_order_id required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			status = 'submitted',
+			submitted_at = NOW(),
+			broker_order_id = $5,
+			last_error = NULL,
+			row_version = row_version + 1,
+			updated_at = NOW()
+		WHERE proposal_id = $1 AND portfolio_id = $2
+		  AND status = 'approved'
+		  AND payload_hash = $3
+		  AND row_version = $4
+	`, p.ProposalID, p.PortfolioID, p.PayloadHash, p.RowVersion, brokerID)
+	if err != nil {
+		return fmt.Errorf("proposals: submit update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSubmitConflict
+	}
+	observability.IncProposedTradeTransition("approved", "submitted")
+	if s.log != nil {
+		s.log.Info("proposal_submitted",
+			zap.String("proposal_id", p.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
+			zap.String("broker_order_id", brokerID),
+		)
+	}
+	return nil
+}
+
+// MarkProposalBrokerError records an Alpaca/broker failure while the row stays approved for retry.
+func (s *Store) MarkProposalBrokerError(ctx context.Context, portfolioID, proposalID uuid.UUID, msg string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		msg = "broker error"
+	}
+	if len(msg) > 8000 {
+		msg = msg[:8000]
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			last_error = $3,
+			updated_at = NOW()
+		WHERE proposal_id = $1 AND portfolio_id = $2
+		  AND status = 'approved'
+	`, proposalID, portfolioID, msg)
+	if err != nil {
+		return fmt.Errorf("proposals: broker error update: %w", err)
+	}
+	if s.log != nil {
+		s.log.Warn("proposal_submit_broker_error",
+			zap.String("proposal_id", proposalID.String()),
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.String("error", msg),
 		)
 	}
 	return nil

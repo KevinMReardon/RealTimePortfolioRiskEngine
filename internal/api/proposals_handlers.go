@@ -6,9 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
-	"go.uber.org/zap"
 )
 
 type proposalListResponse struct {
@@ -171,35 +169,5 @@ func postProposalDenyHandler(store *proposals.Store, readStore PortfolioReadStor
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "rejected"})
-	}
-}
-
-func postProposalSubmitHandler(store *proposals.Store, readStore PortfolioReadStore, priceStreamPartitions []uuid.UUID, log *zap.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		pid, ok := ensurePortfolioAccess(c, readStore, priceStreamPartitions)
-		if !ok {
-			return
-		}
-		if store == nil {
-			respondAPIError(c, http.StatusServiceUnavailable, ErrCodeInsufficientData, "proposals store not configured", nil)
-			return
-		}
-		propID, err := uuid.Parse(c.Param("proposal_id"))
-		if err != nil {
-			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "proposal_id must be a UUID", nil)
-			return
-		}
-		if log == nil {
-			log = zap.NewNop()
-		}
-		observability.IncProposalSubmitNotImplemented()
-		log.Info("proposal_submit_not_implemented",
-			zap.String("portfolio_id", pid.String()),
-			zap.String("proposal_id", propID.String()),
-		)
-		respondAPIError(c, http.StatusNotImplemented, ErrCodeNotImplemented, "broker execution not implemented", map[string]any{
-			"proposal_id": propID.String(),
-			"portfolio_id": pid.String(),
-		})
 	}
 }

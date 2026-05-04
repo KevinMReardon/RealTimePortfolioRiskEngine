@@ -3,17 +3,19 @@ package alpaca
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	sdkalpaca "github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
 )
 
-// REST is a narrow read-only trading API surface (Phase 0). Implementations wrap the official SDK.
+// REST is a narrow trading API surface (Phase 0 read + Phase 2 submit). Implementations wrap the official SDK.
 type REST interface {
 	GetAccount(ctx context.Context) (AccountSummary, error)
 	ListPositions(ctx context.Context) ([]PositionRow, error)
 	ListActivities(ctx context.Context, req ListActivitiesRequest) (ActivitiesPage, error)
 	ListOrders(ctx context.Context, req ListOrdersRequest) ([]OrderSnapshot, error)
+	PlaceOrder(ctx context.Context, in PlaceOrderInput) (OrderSnapshot, error)
 }
 
 // RESTClient wraps the Alpaca REST client behind the REST interface.
@@ -119,6 +121,90 @@ func (c *RESTClient) ListOrders(ctx context.Context, req ListOrdersRequest) ([]O
 		out = append(out, mapOrder(&orders[i]))
 	}
 	return out, nil
+}
+
+// PlaceOrder implements REST (POST /v2/orders).
+func (c *RESTClient) PlaceOrder(ctx context.Context, in PlaceOrderInput) (OrderSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return OrderSnapshot{}, err
+	}
+	req, err := placeOrderInputToSDK(in)
+	if err != nil {
+		return OrderSnapshot{}, err
+	}
+	o, err := c.sdk.PlaceOrder(req)
+	if err != nil {
+		return OrderSnapshot{}, fmt.Errorf("alpaca PlaceOrder: %w", err)
+	}
+	return mapOrder(o), nil
+}
+
+func placeOrderInputToSDK(in PlaceOrderInput) (sdkalpaca.PlaceOrderRequest, error) {
+	sym := strings.TrimSpace(in.Symbol)
+	if sym == "" {
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: symbol required")
+	}
+	sideRaw := strings.TrimSpace(strings.ToLower(in.Side))
+	var side sdkalpaca.Side
+	switch sideRaw {
+	case "buy":
+		side = sdkalpaca.Buy
+	case "sell":
+		side = sdkalpaca.Sell
+	default:
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: side must be BUY or SELL")
+	}
+	ot := strings.TrimSpace(strings.ToLower(in.OrderType))
+	if ot == "" {
+		ot = "market"
+	}
+	var orderType sdkalpaca.OrderType
+	switch ot {
+	case "market":
+		orderType = sdkalpaca.Market
+	case "limit":
+		orderType = sdkalpaca.Limit
+	default:
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: unsupported order_type %q (use market or limit)", in.OrderType)
+	}
+	tifRaw := strings.TrimSpace(strings.ToLower(in.TimeInForce))
+	if tifRaw == "" {
+		tifRaw = "day"
+	}
+	var tif sdkalpaca.TimeInForce
+	switch tifRaw {
+	case "day":
+		tif = sdkalpaca.Day
+	case "gtc":
+		tif = sdkalpaca.GTC
+	case "ioc":
+		tif = sdkalpaca.IOC
+	case "fok":
+		tif = sdkalpaca.FOK
+	default:
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: unsupported time_in_force %q", in.TimeInForce)
+	}
+	if orderType == sdkalpaca.Limit && (in.LimitPrice == nil || in.LimitPrice.IsZero()) {
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: limit_price required for limit orders")
+	}
+	if in.Qty == nil && in.NotionalUSD == nil {
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: quantity or notional_usd required")
+	}
+	coid := strings.TrimSpace(in.ClientOrderID)
+	if coid == "" {
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: client_order_id required")
+	}
+	req := sdkalpaca.PlaceOrderRequest{
+		Symbol:        sym,
+		Side:          side,
+		Type:          orderType,
+		TimeInForce:   tif,
+		ClientOrderID: coid,
+		Qty:           in.Qty,
+		Notional:      in.NotionalUSD,
+		LimitPrice:    in.LimitPrice,
+	}
+	return req, nil
 }
 
 func mapAccount(a *sdkalpaca.Account) AccountSummary {

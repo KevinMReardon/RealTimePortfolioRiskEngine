@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
@@ -74,7 +75,7 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 		return fmt.Errorf("proposal materialize: kill switch: %w", err)
 	}
 	killEnv, killDB := proposals.KillSwitchInputs(m.TradingHalt, dbKillActive, dbKillPresent)
-	snap := buildPolicySnapshot(in, equityAnchor, nowNY, killEnv, killDB)
+	snap := BuildPolicySnapshot(in, equityAnchor, nowNY, killEnv, killDB)
 
 	for i := range out.TradeIdeas {
 		idea := out.TradeIdeas[i]
@@ -138,7 +139,7 @@ func briefingIdeaMaterializable(idea BriefingIdea) bool {
 	}
 	if hasNotional {
 		n, err := decimal.NewFromString(strings.TrimSpace(idea.NotionalUSD))
-		if err != nil || !n.IsPositive() {
+		if err != nil || !n.IsPositive() || n.LessThan(alpaca.MinNotionalStockOrderUSD) {
 			return false
 		}
 	}
@@ -195,7 +196,8 @@ func intentFromBriefingIdea(idea BriefingIdea) (policy.Intent, error) {
 	}, nil
 }
 
-func buildPolicySnapshot(in portfolio.PortfolioAssemblerInput, equityAnchor decimal.Decimal, nowNY time.Time, killEnv, killDB bool) policy.Snapshot {
+// BuildPolicySnapshot builds a policy evaluation snapshot from assembler input (materializer + proposal submit).
+func BuildPolicySnapshot(in portfolio.PortfolioAssemblerInput, equityAnchor decimal.Decimal, nowNY time.Time, killEnv, killDB bool) policy.Snapshot {
 	posQty := make(map[string]decimal.Decimal)
 	marks := make(map[string]decimal.Decimal)
 	totalMV := decimal.Zero
