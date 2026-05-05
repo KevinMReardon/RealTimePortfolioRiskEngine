@@ -22,6 +22,10 @@ func TestLoadAgentBriefingDefaults(t *testing.T) {
 	t.Setenv("AGENT_SESSION_TIMEOUT_SECONDS", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("AGENT_EXEC_MODE", "")
+	t.Setenv("AGENT_CRITIC_MODEL", "")
+	t.Setenv("AGENT_PAPER_AUTO_TIMEOUT_SECONDS", "")
+	t.Setenv("AGENT_MAX_AUTO_SUBMITS_PER_SESSION", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -71,6 +75,21 @@ func TestLoadAgentBriefingDefaults(t *testing.T) {
 	if cfg.PolicyMode != policy.ModeEnforce {
 		t.Fatalf("PolicyMode = %v, want enforce", cfg.PolicyMode)
 	}
+	if cfg.AgentExecMode != AgentExecModeOff {
+		t.Fatalf("AgentExecMode = %q, want %q", cfg.AgentExecMode, AgentExecModeOff)
+	}
+	if cfg.AgentExecPaperAutoSuppressedDueToMonitorPolicy {
+		t.Fatalf("AgentExecPaperAutoSuppressedDueToMonitorPolicy = true, want false")
+	}
+	if cfg.AgentCriticModel != "" {
+		t.Fatalf("AgentCriticModel = %q, want empty", cfg.AgentCriticModel)
+	}
+	if cfg.AgentPaperAutoTimeout != 300*time.Second {
+		t.Fatalf("AgentPaperAutoTimeout = %v, want 300s", cfg.AgentPaperAutoTimeout)
+	}
+	if cfg.AgentMaxAutoSubmitsPerSession != 5 {
+		t.Fatalf("AgentMaxAutoSubmitsPerSession = %d, want 5", cfg.AgentMaxAutoSubmitsPerSession)
+	}
 	if cfg.ProposalsRuntimeEnabled() {
 		t.Fatalf("ProposalsRuntimeEnabled() = true, want false")
 	}
@@ -100,6 +119,10 @@ func TestLoadAgentBriefingOverridesAndClamps(t *testing.T) {
 	t.Setenv("AGENT_SESSION_TIMEOUT_SECONDS", "3")
 	t.Setenv("ANTHROPIC_API_KEY", "  key  ")
 	t.Setenv("ANTHROPIC_BASE_URL", "  https://api.anthropic.com  ")
+	t.Setenv("AGENT_EXEC_MODE", "")
+	t.Setenv("AGENT_CRITIC_MODEL", "")
+	t.Setenv("AGENT_PAPER_AUTO_TIMEOUT_SECONDS", "")
+	t.Setenv("AGENT_MAX_AUTO_SUBMITS_PER_SESSION", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -150,3 +173,74 @@ func TestLoadAgentBriefingOverridesAndClamps(t *testing.T) {
 	}
 }
 
+func TestLoadAgentExecModePaperAutoSuppressedWhenPolicyMonitor(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost:5432/test?sslmode=disable")
+	t.Setenv("POLICY_MODE", "monitor")
+	t.Setenv("AGENT_EXEC_MODE", AgentExecModePaperAuto)
+	t.Setenv("AGENT_BRIEFING_ENABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PolicyMode != policy.ModeMonitor {
+		t.Fatalf("PolicyMode = %v, want monitor", cfg.PolicyMode)
+	}
+	if cfg.AgentExecMode != AgentExecModeOff {
+		t.Fatalf("AgentExecMode = %q, want forced off", cfg.AgentExecMode)
+	}
+	if !cfg.AgentExecPaperAutoSuppressedDueToMonitorPolicy {
+		t.Fatalf("expected suppression flag true")
+	}
+}
+
+func TestLoadAgentExecModePaperAutoWithPolicyEnforce(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost:5432/test?sslmode=disable")
+	t.Setenv("POLICY_MODE", "enforce")
+	t.Setenv("AGENT_EXEC_MODE", AgentExecModePaperAuto)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AgentExecMode != AgentExecModePaperAuto {
+		t.Fatalf("AgentExecMode = %q, want paper_auto", cfg.AgentExecMode)
+	}
+	if cfg.AgentExecPaperAutoSuppressedDueToMonitorPolicy {
+		t.Fatalf("unexpected suppression")
+	}
+}
+
+func TestLoadAgentExecModeInvalid(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost:5432/test?sslmode=disable")
+	t.Setenv("POLICY_MODE", "enforce")
+	t.Setenv("AGENT_EXEC_MODE", "live_auto")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() error = nil, want invalid AGENT_EXEC_MODE")
+	}
+}
+
+func TestLoadAgentExecCompanionDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost:5432/test?sslmode=disable")
+	t.Setenv("POLICY_MODE", "enforce")
+	t.Setenv("AGENT_EXEC_MODE", AgentExecModeOff)
+	t.Setenv("AGENT_CRITIC_MODEL", "  claude-test  ")
+	t.Setenv("AGENT_PAPER_AUTO_TIMEOUT_SECONDS", "60")
+	t.Setenv("AGENT_MAX_AUTO_SUBMITS_PER_SESSION", "2")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AgentCriticModel != "claude-test" {
+		t.Fatalf("AgentCriticModel = %q", cfg.AgentCriticModel)
+	}
+	if cfg.AgentPaperAutoTimeout != 60*time.Second {
+		t.Fatalf("AgentPaperAutoTimeout = %v", cfg.AgentPaperAutoTimeout)
+	}
+	if cfg.AgentMaxAutoSubmitsPerSession != 2 {
+		t.Fatalf("AgentMaxAutoSubmitsPerSession = %d", cfg.AgentMaxAutoSubmitsPerSession)
+	}
+}

@@ -51,6 +51,16 @@ const (
 	defaultAgentMaxTurns          = 8
 	defaultAgentSessionTimeoutSec = 120
 	defaultPolicyMode             = "enforce"
+
+	// Phase 3 autonomous execution (AGENT_EXEC_MODE); orchestration is wired in later PRs.
+	defaultAgentPaperAutoTimeoutSec      = 300 // 5 minutes
+	defaultAgentMaxAutoSubmitsPerSession = 5
+)
+
+// Agent execution modes for AGENT_EXEC_MODE (exact env strings; default off).
+const (
+	AgentExecModeOff       = "off"
+	AgentExecModePaperAuto = "paper_auto"
 )
 
 type Config struct {
@@ -228,6 +238,24 @@ type Config struct {
 	AgentMaxTurns int
 	// AgentSessionTimeout from AGENT_SESSION_TIMEOUT_SECONDS (default 120, min 10s).
 	AgentSessionTimeout time.Duration
+
+	// --- Phase 3 agent execution (submit orchestration wired later; see AGENT_EXEC_MODE) ---
+	// AgentExecMode is the effective mode after startup safety rules.
+	// Env: AGENT_EXEC_MODE — AgentExecModeOff (default, unset or "off") or AgentExecModePaperAuto ("paper_auto").
+	AgentExecMode string
+	// AgentExecPaperAutoSuppressedDueToMonitorPolicy is set when paper_auto was requested but POLICY_MODE=monitor:
+	// autonomous Alpaca submit must not run in monitor mode (violations become effective ALLOW). Load() forces
+	// effective AgentExecMode to AgentExecModeOff and records this flag — fail-closed for Phase 3 auto-submit only.
+	AgentExecPaperAutoSuppressedDueToMonitorPolicy bool
+	// AgentCriticModel optional critic/review model id for Phase 3 (empty = server default when orchestration exists).
+	// Env: AGENT_CRITIC_MODEL (default empty).
+	AgentCriticModel string
+	// AgentPaperAutoTimeout bounds one autonomous paper submit pipeline attempt (future orchestration).
+	// Env: AGENT_PAPER_AUTO_TIMEOUT_SECONDS (default 300; min 10).
+	AgentPaperAutoTimeout time.Duration
+	// AgentMaxAutoSubmitsPerSession caps broker submits per agent session (future orchestration).
+	// Env: AGENT_MAX_AUTO_SUBMITS_PER_SESSION (default 5; min 1).
+	AgentMaxAutoSubmitsPerSession int
 
 	// --- Phase 2 proposals / policy-as-code (HTTP wiring optional; see PROPOSALS_ENABLED) ---
 	// ProposalsEnabled toggles proposal persistence APIs when implemented.
@@ -481,6 +509,47 @@ func Load() (Config, error) {
 	default:
 		policyMode = policy.ModeEnforce
 	}
+
+	execRaw := strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_EXEC_MODE")))
+	if execRaw == "" {
+		execRaw = AgentExecModeOff
+	}
+	var execRequested string
+	switch execRaw {
+	case AgentExecModeOff:
+		execRequested = AgentExecModeOff
+	case AgentExecModePaperAuto:
+		execRequested = AgentExecModePaperAuto
+	default:
+		return Config{}, fmt.Errorf(
+			"AGENT_EXEC_MODE: invalid %q (use %q or %q)",
+			execRaw,
+			AgentExecModeOff,
+			AgentExecModePaperAuto,
+		)
+	}
+	execEffective := execRequested
+	execSuppressedByMonitor := false
+	if execRequested == AgentExecModePaperAuto && policyMode == policy.ModeMonitor {
+		// Fail-closed for autonomous submit: POLICY_MODE=monitor must not pair with paper_auto (would allow trades
+		// policy marked DENY). We downgrade to off instead of failing process startup so briefing/APIs still run.
+		execEffective = AgentExecModeOff
+		execSuppressedByMonitor = true
+	}
+
+	agentCriticModel := strings.TrimSpace(os.Getenv("AGENT_CRITIC_MODEL"))
+	agentPaperAutoTimeoutSec := getEnvInt("AGENT_PAPER_AUTO_TIMEOUT_SECONDS", defaultAgentPaperAutoTimeoutSec)
+	if agentPaperAutoTimeoutSec < 10 {
+		agentPaperAutoTimeoutSec = defaultAgentPaperAutoTimeoutSec
+	}
+	if agentPaperAutoTimeoutSec > 86400 {
+		agentPaperAutoTimeoutSec = 86400
+	}
+	agentMaxAutoSubmits := getEnvInt("AGENT_MAX_AUTO_SUBMITS_PER_SESSION", defaultAgentMaxAutoSubmitsPerSession)
+	if agentMaxAutoSubmits < 1 {
+		agentMaxAutoSubmits = defaultAgentMaxAutoSubmitsPerSession
+	}
+
 	policyMaxOrdersPerMinute := getEnvInt("POLICY_MAX_ORDERS_PER_MINUTE", 0)
 	if policyMaxOrdersPerMinute < 0 {
 		policyMaxOrdersPerMinute = 0
@@ -547,16 +616,22 @@ func Load() (Config, error) {
 			"AGENT_BRIEFING_SCHEDULER_ENABLED",
 			false,
 		),
-		AgentBriefingCron: agentBriefingCron,
-		AgentBriefingTZ:   agentBriefingTZ,
-		AnthropicAPIKey:   strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
-		AnthropicBaseURL:  strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
-		AgentModel:        agentModel,
-		AgentMaxTokens:    agentMaxTokens,
-		AgentTemperature:  agentTemperature,
-		AgentMaxToolCalls: agentMaxToolCalls,
-		AgentMaxTurns:     agentMaxTurns,
+		AgentBriefingCron:   agentBriefingCron,
+		AgentBriefingTZ:     agentBriefingTZ,
+		AnthropicAPIKey:     strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
+		AnthropicBaseURL:    strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+		AgentModel:          agentModel,
+		AgentMaxTokens:      agentMaxTokens,
+		AgentTemperature:    agentTemperature,
+		AgentMaxToolCalls:   agentMaxToolCalls,
+		AgentMaxTurns:       agentMaxTurns,
 		AgentSessionTimeout: time.Duration(agentSessionTimeoutSec) * time.Second,
+
+		AgentExecMode: execEffective,
+		AgentExecPaperAutoSuppressedDueToMonitorPolicy: execSuppressedByMonitor,
+		AgentCriticModel:              agentCriticModel,
+		AgentPaperAutoTimeout:         time.Duration(agentPaperAutoTimeoutSec) * time.Second,
+		AgentMaxAutoSubmitsPerSession: agentMaxAutoSubmits,
 
 		ProposalsEnabled:          getEnvBool("PROPOSALS_ENABLED", false),
 		TradingHalt:               getEnvBool("TRADING_HALT", false),
@@ -614,15 +689,15 @@ func (c Config) PolicyConfig() policy.Config {
 	w := append([]string(nil), c.PolicySymbolWhitelist...)
 	b := append([]string(nil), c.PolicySymbolBlacklist...)
 	return policy.Config{
-		Mode:                   c.PolicyMode,
-		SymbolWhitelist:        w,
-		SymbolBlacklist:        b,
-		MaxOrderNotionalUSD:    c.PolicyMaxOrderNotionalUSD,
-		MaxDailyNotionalUSD:    c.PolicyMaxDailyNotionalUSD,
-		MaxPositionPct:         c.PolicyMaxPositionPct,
-		MaxDailyLossPct:        c.PolicyMaxDailyLossPct,
-		MaxOrdersPerMinute:     c.PolicyMaxOrdersPerMinute,
-		PolicyVersion:          c.PolicyVersion,
+		Mode:                c.PolicyMode,
+		SymbolWhitelist:     w,
+		SymbolBlacklist:     b,
+		MaxOrderNotionalUSD: c.PolicyMaxOrderNotionalUSD,
+		MaxDailyNotionalUSD: c.PolicyMaxDailyNotionalUSD,
+		MaxPositionPct:      c.PolicyMaxPositionPct,
+		MaxDailyLossPct:     c.PolicyMaxDailyLossPct,
+		MaxOrdersPerMinute:  c.PolicyMaxOrdersPerMinute,
+		PolicyVersion:       c.PolicyVersion,
 	}
 }
 

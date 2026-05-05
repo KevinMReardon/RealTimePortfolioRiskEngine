@@ -281,6 +281,18 @@ func run() error {
 		)
 	}
 
+	if cfg.AgentBriefingEnabled {
+		logger.Info("agent_exec_mode",
+			zap.String("effective", cfg.AgentExecMode),
+			zap.Bool("paper_auto_suppressed_by_monitor_policy", cfg.AgentExecPaperAutoSuppressedDueToMonitorPolicy),
+		)
+		if cfg.AgentExecPaperAutoSuppressedDueToMonitorPolicy {
+			logger.Warn("agent_exec_paper_auto_suppressed",
+				zap.String("reason", "AGENT_EXEC_MODE=paper_auto is incompatible with POLICY_MODE=monitor for autonomous submit; effective mode forced to off"),
+			)
+		}
+	}
+
 	var agentSvc agent.AgentService
 	if cfg.AgentBriefingRuntimeEnabled() {
 		if strings.TrimSpace(cfg.AnthropicAPIKey) == "" {
@@ -380,10 +392,10 @@ func run() error {
 		AgentService:              agentSvc,
 		AgentMaxTokens:            cfg.AgentMaxTokens,
 		AgentTemperature:          cfg.AgentTemperature,
-		ProposalsStore:       proposalStore,
-		ProposalAlpacaKeys:   repo,
-		ProposalPolicy:       cfg.PolicyConfig(),
-		ProposalTradingHalt:  cfg.TradingHalt,
+		ProposalsStore:            proposalStore,
+		ProposalAlpacaKeys:        repo,
+		ProposalPolicy:            cfg.PolicyConfig(),
+		ProposalTradingHalt:       cfg.TradingHalt,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
