@@ -3,20 +3,17 @@ package api
 import (
 	"context"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 )
 
 // ProposalAlpacaKeyLoader returns stored per-portfolio Alpaca keys for broker submit.
@@ -40,6 +37,9 @@ func postProposalSubmitHandler(
 	tradingHaltEnv bool,
 	log *zap.Logger,
 ) gin.HandlerFunc {
+	restFactory := func(cfg alpaca.RESTConfig) (alpaca.REST, error) {
+		return alpaca.NewREST(cfg)
+	}
 	return func(c *gin.Context) {
 		pid, ok := ensurePortfolioAccess(c, readStore, priceStreamPartitions)
 		if !ok {
@@ -93,201 +93,78 @@ func postProposalSubmitHandler(
 			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "invalid request body including JSON shape", nil)
 			return
 		}
-		wantHash := strings.TrimSpace(prop.PayloadHash)
-		wantVer := prop.RowVersion
-		if body.PayloadHash != nil && strings.TrimSpace(*body.PayloadHash) != "" {
-			wantHash = strings.TrimSpace(*body.PayloadHash)
-		}
-		if body.RowVersion != nil {
-			wantVer = *body.RowVersion
-		}
-		if wantHash != prop.PayloadHash || wantVer != prop.RowVersion {
-			log.Info("proposal_submit_rejected", zap.String("reason", "version_mismatch"),
-				zap.String("want_payload_hash", wantHash), zap.Int("want_row_version", wantVer),
-				zap.String("db_payload_hash", prop.PayloadHash), zap.Int("db_row_version", prop.RowVersion))
-			respondAPIError(c, http.StatusConflict, ErrCodeConflict, "stale proposal version or payload mismatch", nil)
-			observability.ObserveProposalSubmit("version_mismatch")
-			return
-		}
 
-		keys, linked, err := alpacaKeys.LoadPortfolioAlpacaKeyMaterial(ctx, pid)
-		if err != nil {
-			log.Warn("proposal_submit_alpaca_keys_failed", zap.Error(err))
-			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
-			observability.ObserveProposalSubmit("error")
-			return
+		deps := submit.Deps{
+			Store:          store,
+			Read:           readStore,
+			Keys:           alpacaKeys,
+			Policy:         pol,
+			TradingHaltEnv: tradingHaltEnv,
+			Log:            log,
+			NewREST:        restFactory,
 		}
-		if !linked {
-			log.Warn("proposal_submit_rejected", zap.String("reason", "no_alpaca_keys"), zap.String("portfolio_id", pid.String()))
-			respondAPIError(c, http.StatusServiceUnavailable, ErrCodeInsufficientData, "portfolio has no Alpaca API keys; link Alpaca before submitting orders", nil)
-			observability.ObserveProposalSubmit("no_keys")
-			return
-		}
-
-		baseURL := strings.TrimSpace(keys.BaseURL)
-		if baseURL == "" {
-			if strings.EqualFold(keys.AccountMode, "live") {
-				baseURL = alpaca.DefaultRESTBaseURLLive
-			} else {
-				baseURL = alpaca.DefaultRESTBaseURLPaper
-			}
-		}
-		restCli, err := alpaca.NewREST(alpaca.RESTConfig{
-			KeyID:     keys.KeyID,
-			SecretKey: keys.SecretKey,
-			BaseURL:   baseURL,
+		res := submit.FromProposal(ctx, deps, prop, submit.Options{
+			PayloadHash: body.PayloadHash,
+			RowVersion:  body.RowVersion,
 		})
-		if err != nil {
-			log.Warn("proposal_submit_alpaca_client_failed", zap.Error(err))
-			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
-			observability.ObserveProposalSubmit("error")
-			return
-		}
+		mapProposalSubmitResult(c, log, res)
+	}
+}
 
-		acct, err := restCli.GetAccount(ctx)
-		if err != nil {
-			log.Warn("proposal_submit_alpaca_account_failed", zap.Error(err))
-			_ = store.MarkProposalBrokerError(ctx, pid, propID, "alpaca GetAccount: "+err.Error())
-			respondAPIError(c, http.StatusBadGateway, ErrCodeInternal, "broker account request failed", map[string]any{
-				"detail": err.Error(),
-			})
-			observability.ObserveProposalSubmit("alpaca_account_error")
-			return
-		}
-		if acct.TradingBlocked || acct.AccountBlocked {
-			respondAPIError(c, http.StatusForbidden, ErrCodeForbidden, "Alpaca account is not permitted to trade", map[string]any{
-				"trading_blocked": acct.TradingBlocked,
-				"account_blocked": acct.AccountBlocked,
-			})
-			observability.ObserveProposalSubmit("account_blocked")
-			return
-		}
+func mapProposalSubmitResult(c *gin.Context, log *zap.Logger, res submit.Result) {
+	outcome := string(res.Outcome)
+	observability.ObserveProposalSubmit(outcome)
 
-		inAsm, found, err := readStore.LoadPortfolioAssemblerInput(ctx, pid)
-		if err != nil || !found {
-			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
-			observability.ObserveProposalSubmit("error")
-			return
-		}
-		nyLoc, err := time.LoadLocation("America/New_York")
-		if err != nil {
-			nyLoc = time.FixedZone("America/New_York", -5*3600)
-		}
-		nowNY := time.Now().In(nyLoc)
-		anchorDate := time.Date(nowNY.Year(), nowNY.Month(), nowNY.Day(), 0, 0, 0, 0, time.UTC)
-		equityAnchor := decimal.Zero
-		if eq, ok, err := store.LoadEquityAnchorForPortfolioDate(ctx, pid, anchorDate); err == nil && ok {
-			equityAnchor = eq
-		}
-		dbKillActive, dbKillPresent, err := store.KillSwitchLatestActive(ctx)
-		if err != nil {
-			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
-			observability.ObserveProposalSubmit("error")
-			return
-		}
-		killEnv, killDB := proposals.KillSwitchInputs(tradingHaltEnv, dbKillActive, dbKillPresent)
-		snap := agent.BuildPolicySnapshot(inAsm, equityAnchor, nowNY, killEnv, killDB)
-		snap.OptionalBroker = &policy.BrokerAccountSnapshot{
-			PatternDayTrader: acct.PatternDayTrader,
-			TradingBlocked:   acct.TradingBlocked,
-			AccountBlocked:   acct.AccountBlocked,
-			Equity:           acct.Equity,
-		}
-
-		intent, err := proposals.IntentFromProposal(prop)
-		if err != nil {
-			log.Info("proposal_submit_rejected", zap.String("reason", "bad_intent"), zap.Error(err))
-			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, err.Error(), nil)
-			observability.ObserveProposalSubmit("bad_intent")
-			return
-		}
-		dec := policy.EvaluateForBrokerSubmit(intent, snap, pol)
-		if dec.EffectiveOutcome != policy.OutcomeAllow {
-			respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "policy blocks submission for current market snapshot", map[string]any{
-				"effective_outcome": string(dec.EffectiveOutcome),
-				"violations":        dec.Violations,
-			})
-			observability.ObserveProposalSubmit("policy_denied")
-			return
-		}
-
-		if prop.NotionalUSD != nil && prop.NotionalUSD.LessThan(alpaca.MinNotionalStockOrderUSD) {
-			log.Info("proposal_submit_rejected", zap.String("reason", "notional_below_broker_minimum"),
-				zap.String("notional_usd", prop.NotionalUSD.String()))
-			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "notional_usd must be at least 1.00 USD (Alpaca minimum); use quantity or increase size", map[string]any{
-				"min_notional_usd": alpaca.MinNotionalStockOrderUSD.String(),
-			})
-			observability.ObserveProposalSubmit("notional_below_minimum")
-			return
-		}
-
-		coid := ""
-		if prop.ClientOrderID != nil {
-			coid = strings.TrimSpace(*prop.ClientOrderID)
-		}
-		if coid == "" {
-			coid = "rtp-" + strings.ReplaceAll(propID.String(), "-", "")
-		}
-		ot := ""
-		if prop.OrderType != nil {
-			ot = strings.TrimSpace(*prop.OrderType)
-		}
-		tif := ""
-		if prop.TimeInForce != nil {
-			tif = strings.TrimSpace(*prop.TimeInForce)
-		}
-		placeIn := alpaca.PlaceOrderInput{
-			Symbol:        strings.TrimSpace(prop.Symbol),
-			Side:          strings.TrimSpace(strings.ToUpper(prop.Side)),
-			Qty:           prop.Quantity,
-			NotionalUSD:   prop.NotionalUSD,
-			OrderType:     ot,
-			TimeInForce:   tif,
-			LimitPrice:    prop.LimitPrice,
-			ClientOrderID: coid,
-		}
-
-		orderSnap, err := restCli.PlaceOrder(ctx, placeIn)
-		if err != nil {
-			msg := err.Error()
-			_ = store.MarkProposalBrokerError(ctx, pid, propID, msg)
-			log.Warn("proposal_submit_alpaca_place_failed", zap.Error(err))
-			respondAPIError(c, http.StatusBadGateway, ErrCodeInternal, "broker order request failed", map[string]any{
-				"detail": msg,
-			})
-			observability.ObserveProposalSubmit("alpaca_place_error")
-			return
-		}
-		brokerID := strings.TrimSpace(orderSnap.ID)
-		if brokerID == "" {
-			brokerID = strings.TrimSpace(orderSnap.ClientOrderID)
-		}
-		if err := store.MarkProposalSubmitted(ctx, proposals.SubmitSuccessParams{
-			PortfolioID:   pid,
-			ProposalID:    propID,
-			PayloadHash:   prop.PayloadHash,
-			RowVersion:    prop.RowVersion,
-			BrokerOrderID: brokerID,
-		}); err != nil {
-			if err == proposals.ErrSubmitConflict {
-				respondAPIError(c, http.StatusConflict, ErrCodeConflict, "submit conflict (proposal changed during broker call)", nil)
-				observability.ObserveProposalSubmit("conflict_after_broker")
-				return
-			}
-			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
-			observability.ObserveProposalSubmit("error")
-			return
-		}
-		log.Info("proposal_submit_succeeded",
-			zap.String("portfolio_id", pid.String()),
-			zap.String("proposal_id", propID.String()),
-			zap.String("broker_order_id", brokerID),
-		)
-		observability.ObserveProposalSubmit("success")
+	switch res.Outcome {
+	case submit.OutcomeSuccess:
 		c.JSON(http.StatusOK, gin.H{
 			"status":          "submitted",
-			"broker_order_id": brokerID,
-			"proposal_id":     propID.String(),
+			"broker_order_id": res.BrokerOrderID,
+			"proposal_id":     res.ProposalID.String(),
 		})
+	case submit.OutcomeNotFound:
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, "proposal not found", nil)
+	case submit.OutcomeError:
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
+	case submit.OutcomeBadStatus:
+		respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "proposal must be in approved status to submit", map[string]any{
+			"status": res.ProposalStatus,
+		})
+	case submit.OutcomeVersionMismatch:
+		respondAPIError(c, http.StatusConflict, ErrCodeConflict, "stale proposal version or payload mismatch", nil)
+	case submit.OutcomeNoKeys:
+		respondAPIError(c, http.StatusServiceUnavailable, ErrCodeInsufficientData, "portfolio has no Alpaca API keys; link Alpaca before submitting orders", nil)
+	case submit.OutcomeAlpacaAccountError:
+		respondAPIError(c, http.StatusBadGateway, ErrCodeInternal, "broker account request failed", map[string]any{
+			"detail": res.BrokerDetail,
+		})
+	case submit.OutcomeAccountBlocked:
+		respondAPIError(c, http.StatusForbidden, ErrCodeForbidden, "Alpaca account is not permitted to trade", map[string]any{
+			"trading_blocked": res.TradingBlocked,
+			"account_blocked": res.AccountBlocked,
+		})
+	case submit.OutcomeBadIntent:
+		respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, res.ValidationMsg, nil)
+	case submit.OutcomePolicyDenied:
+		dec := res.PolicyDecision
+		respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "policy blocks submission for current market snapshot", map[string]any{
+			"effective_outcome": string(dec.EffectiveOutcome),
+			"violations":        dec.Violations,
+		})
+	case submit.OutcomeNotionalBelowMinimum:
+		respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "notional_usd must be at least 1.00 USD (Alpaca minimum); use quantity or increase size", map[string]any{
+			"min_notional_usd": alpaca.MinNotionalStockOrderUSD.String(),
+		})
+	case submit.OutcomeAlpacaPlaceError:
+		respondAPIError(c, http.StatusBadGateway, ErrCodeInternal, "broker order request failed", map[string]any{
+			"detail": res.BrokerDetail,
+		})
+	case submit.OutcomeConflictAfterBroker:
+		respondAPIError(c, http.StatusConflict, ErrCodeConflict, "submit conflict (proposal changed during broker call)", nil)
+	default:
+		if log != nil {
+			log.Warn("proposal_submit_unknown_outcome", zap.String("outcome", outcome))
+		}
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
 	}
 }
