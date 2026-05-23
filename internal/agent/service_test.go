@@ -412,19 +412,20 @@ func TestCreateBriefingOnDemand_EnrichesPromptWithPortfolioID(t *testing.T) {
 	}
 }
 
-func TestCreateBriefingScheduled_IdempotentPerDay(t *testing.T) {
+func TestCreateBriefingScheduled_SkipsWhenSessionRunning(t *testing.T) {
 	t.Parallel()
 	pid := uuid.New()
 	runDate := time.Date(2026, 4, 26, 15, 0, 0, 0, time.UTC)
+	existingID := uuid.New()
 	store := &mockAgentStore{
 		list: []events.AgentSession{
 			{
-				SessionID:         uuid.New(),
-				PortfolioID:       pid,
-				TriggerSource:     "scheduled",
-				RunDate:           runDate,
-				Status:            "succeeded",
-				ResponseValidated: json.RawMessage(`{"market_summary":"m","portfolio_context":"p","trade_ideas":[],"risks_and_caveats":"r","data_gaps":[],"disclaimer":"d","used_sources":[],"used_fields":[]}`),
+				SessionID:     existingID,
+				PortfolioID:   pid,
+				TriggerSource: "scheduled",
+				RunDate:       runDate,
+				// Only an active session (queued/running) should suppress new scheduled ticks.
+				Status: "running",
 			},
 		},
 	}
@@ -438,10 +439,10 @@ func TestCreateBriefingScheduled_IdempotentPerDay(t *testing.T) {
 		t.Fatalf("CreateBriefingScheduled: %v", err)
 	}
 	if store.createCalls != 0 {
-		t.Fatalf("expected no new create due to idempotency, createCalls=%d", store.createCalls)
+		t.Fatalf("expected no new create while session running, createCalls=%d", store.createCalls)
 	}
-	if out.Session.TriggerSource != "scheduled" {
-		t.Fatalf("expected existing scheduled session, got trigger=%s", out.Session.TriggerSource)
+	if out.Session.SessionID != existingID {
+		t.Fatalf("expected existing running session returned, got id=%s", out.Session.SessionID)
 	}
 }
 
@@ -545,6 +546,7 @@ func TestRunBriefing_UsesConfiguredSessionTimeout(t *testing.T) {
 		"claude-test",
 		nil,
 		timeout,
+		nil,
 		nil,
 	)
 	_, err := svc.RunBriefing(context.Background(), RunBriefingRequest{

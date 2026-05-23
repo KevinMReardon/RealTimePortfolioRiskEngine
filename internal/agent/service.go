@@ -27,6 +27,25 @@ type Service struct {
 	log          *zap.Logger
 	sessionTimeout time.Duration
 	materializer   ProposalMaterializer
+	paperAuto      *PaperAutoRunner
+	maxTurns       int
+	maxToolCalls   int
+}
+
+// WithLimits sets the per-session turn and tool-call caps from config.
+// Returns the receiver so it can be chained after the constructor.
+// Zero values fall back to the package defaults.
+func (s *Service) WithLimits(maxTurns, maxToolCalls int) *Service {
+	if s == nil {
+		return s
+	}
+	if maxTurns > 0 {
+		s.maxTurns = maxTurns
+	}
+	if maxToolCalls > 0 {
+		s.maxToolCalls = maxToolCalls
+	}
+	return s
 }
 
 const (
@@ -43,7 +62,7 @@ func NewService(store AgentStore, client AnthropicClient, toolExecutor ToolExecu
 }
 
 func NewServiceWithLogger(store AgentStore, client AnthropicClient, toolExecutor ToolExecutor, provider, model string, log *zap.Logger) *Service {
-	return NewServiceWithLoggerAndTimeout(store, client, toolExecutor, provider, model, log, defaultTimeoutBudget, nil)
+	return NewServiceWithLoggerAndTimeout(store, client, toolExecutor, provider, model, log, defaultTimeoutBudget, nil, nil)
 }
 
 func NewServiceWithLoggerAndTimeout(
@@ -54,6 +73,7 @@ func NewServiceWithLoggerAndTimeout(
 	log *zap.Logger,
 	sessionTimeout time.Duration,
 	materializer ProposalMaterializer,
+	paperAuto *PaperAutoRunner,
 ) *Service {
 	if log == nil {
 		log = zap.NewNop()
@@ -70,6 +90,7 @@ func NewServiceWithLoggerAndTimeout(
 		log:            log,
 		sessionTimeout: sessionTimeout,
 		materializer:   materializer,
+		paperAuto:      paperAuto,
 	}
 }
 
@@ -122,11 +143,11 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		}
 		if found {
 			observability.ObserveAgentSessionOutcome("deduped", trigger)
-			s.log.Info("agent_session_deduped",
-				zap.String("session_id", existing.SessionID.String()),
+			s.log.Info("agent_session_skip_in_progress",
+				zap.String("active_session_id", existing.SessionID.String()),
 				zap.String("portfolio_id", req.PortfolioID.String()),
 				zap.String("trigger_source", trigger),
-				zap.String("status", "deduped"),
+				zap.String("active_status", existing.Status),
 			)
 			out := BriefingOutput{}
 			if len(existing.ResponseValidated) > 0 {
@@ -242,10 +263,19 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		},
 	}
 
+	effectiveMaxTurns := s.maxTurns
+	if effectiveMaxTurns <= 0 {
+		effectiveMaxTurns = defaultMaxTurns
+	}
+	effectiveMaxToolCalls := s.maxToolCalls
+	if effectiveMaxToolCalls <= 0 {
+		effectiveMaxToolCalls = defaultMaxToolCalls
+	}
+
 	totalToolCalls := 0
 	seqNo := 1
 	var lastResp AnthropicMessageResponse
-	for turn := 0; turn < defaultMaxTurns; turn++ {
+	for turn := 0; turn < effectiveMaxTurns; turn++ {
 		resp, err := s.client.CreateMessage(runCtx, AnthropicMessageRequest{
 			Model:       modelName,
 			System:      systemPrompt,
@@ -348,7 +378,7 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 
 		toolResultBlocks := make([]AnthropicContentBlock, 0, len(resp.ToolCalls))
 		for _, toolCall := range resp.ToolCalls {
-			if totalToolCalls >= defaultMaxToolCalls {
+			if totalToolCalls >= effectiveMaxToolCalls {
 				if err := s.completeFailureWithPersistenceContext(events.AgentSession{
 					SessionID:     sessionID,
 					Status:        "rate_limited",
@@ -518,8 +548,11 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 	if s.materializer != nil {
 		matCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.materializer.Materialize(matCtx, req.PortfolioID, sessionID, validated); err != nil {
+		propIDs, err := s.materializer.Materialize(matCtx, req.PortfolioID, sessionID, validated)
+		if err != nil {
 			s.log.Warn("proposal_materialize_failed", zap.Error(err))
+		} else if s.paperAuto != nil && len(propIDs) > 0 {
+			go s.paperAuto.RunAfterMaterialize(context.Background(), req.PortfolioID, propIDs)
 		}
 	}
 	terminalPersisted = true
@@ -781,21 +814,21 @@ func isUnknownLike(v string) bool {
 	return s == "" || s == "unknown" || s == "n/a" || s == "na" || s == "tbd" || s == "-"
 }
 
-func (s *Service) findScheduledSessionForDay(ctx context.Context, portfolioID uuid.UUID, runDate time.Time) (events.AgentSession, bool, error) {
+// findScheduledSessionForDay returns any scheduled session for this portfolio that is
+// currently active (queued or running). Completed and failed sessions are intentionally
+// ignored so that hourly cron ticks can run multiple briefings per day; only concurrent
+// duplicates are suppressed.
+func (s *Service) findScheduledSessionForDay(ctx context.Context, portfolioID uuid.UUID, _ time.Time) (events.AgentSession, bool, error) {
 	list, err := s.store.ListAgentSessionsForPortfolio(ctx, portfolioID, events.AgentSessionListFilter{
-		Limit:  200,
+		Limit:  50,
 		Offset: 0,
 	})
 	if err != nil {
 		return events.AgentSession{}, false, err
 	}
-	y, m, d := runDate.UTC().Date()
 	for _, item := range list {
-		if strings.TrimSpace(item.TriggerSource) != "scheduled" {
-			continue
-		}
-		iy, im, id := item.RunDate.UTC().Date()
-		if iy == y && im == m && id == d {
+		st := strings.TrimSpace(item.Status)
+		if st == "queued" || st == "running" {
 			return item, true, nil
 		}
 	}

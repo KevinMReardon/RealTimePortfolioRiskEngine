@@ -14,6 +14,7 @@ import (
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/risk"
 )
 
@@ -52,6 +53,7 @@ const (
 	ToolGetMarketNews     = "get_market_news"
 	ToolGetPositions      = "get_positions"
 	ToolGetBuyingPower    = "get_buying_power"
+	ToolSubmitProposal    = "submit_proposal"
 )
 
 func ToolDefinitions() []ToolDefinition {
@@ -139,6 +141,20 @@ func ToolDefinitions() []ToolDefinition {
 				"required": []string{"portfolio_id"},
 			},
 		},
+		{
+			Name: ToolSubmitProposal,
+			Description: "Submit an already human- or system-approved proposal to the broker via the server submit pipeline. " +
+				"Requires proposal_id and portfolio_id. Does not place orders without an approved proposal row; never exposes broker credentials.",
+			InputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"portfolio_id": map[string]any{"type": "string", "format": "uuid"},
+					"proposal_id":  map[string]any{"type": "string", "format": "uuid"},
+				},
+				"required": []string{"portfolio_id", "proposal_id"},
+			},
+		},
 	}
 }
 
@@ -181,16 +197,18 @@ type ToolDispatcher struct {
 	dataSource         ToolDataSource
 	buyingPower        BuyingPowerProvider
 	marketNewsProvider MarketNewsProvider
+	proposalSubmitter  ProposalSubmitter
 
 	mu    sync.Mutex
 	cache map[string]ToolCallResult
 }
 
-func NewToolDispatcher(dataSource ToolDataSource, buyingPower BuyingPowerProvider, marketNewsProvider MarketNewsProvider) *ToolDispatcher {
+func NewToolDispatcher(dataSource ToolDataSource, buyingPower BuyingPowerProvider, marketNewsProvider MarketNewsProvider, proposalSubmitter ProposalSubmitter) *ToolDispatcher {
 	return &ToolDispatcher{
 		dataSource:         dataSource,
 		buyingPower:        buyingPower,
 		marketNewsProvider: marketNewsProvider,
+		proposalSubmitter:  proposalSubmitter,
 		cache:              make(map[string]ToolCallResult),
 	}
 }
@@ -248,6 +266,8 @@ func (d *ToolDispatcher) executeUncached(ctx context.Context, call ToolCallReque
 		return d.getPositions(ctx, call.Input)
 	case ToolGetBuyingPower:
 		return d.getBuyingPower(ctx, call.Input)
+	case ToolSubmitProposal:
+		return d.submitProposal(ctx, call.Input)
 	default:
 		return ToolCallResult{
 			Output:  json.RawMessage(`{"status":"error","error_code":"unknown_tool"}`),
@@ -518,4 +538,52 @@ func (d *ToolDispatcher) getBuyingPower(ctx context.Context, raw json.RawMessage
 		"portfolio_id": pid.String(),
 		"buying_power": strings.TrimSpace(value),
 	})
+}
+
+type submitProposalInput struct {
+	PortfolioID string `json:"portfolio_id"`
+	ProposalID  string `json:"proposal_id"`
+}
+
+func (d *ToolDispatcher) submitProposal(ctx context.Context, raw json.RawMessage) (ToolCallResult, error) {
+	if d.proposalSubmitter == nil {
+		return encodeToolOutput(map[string]any{
+			"status":     "not_configured",
+			"error_code": "submit_not_configured",
+		})
+	}
+	var in submitProposalInput
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return ToolCallResult{Output: json.RawMessage(`{"status":"error","error_code":"invalid_input"}`), Error: err.Error()}, err
+	}
+	pid, err := uuid.Parse(strings.TrimSpace(in.PortfolioID))
+	if err != nil {
+		return ToolCallResult{Output: json.RawMessage(`{"status":"error","error_code":"invalid_portfolio_id"}`), Error: err.Error()}, err
+	}
+	propID, err := uuid.Parse(strings.TrimSpace(in.ProposalID))
+	if err != nil {
+		return ToolCallResult{Output: json.RawMessage(`{"status":"error","error_code":"invalid_proposal_id"}`), Error: err.Error()}, err
+	}
+	res := d.proposalSubmitter.SubmitApproved(ctx, pid, propID)
+	out := map[string]any{
+		"status":    "error",
+		"outcome":   string(res.Outcome),
+		"proposal_id": propID.String(),
+	}
+	switch res.Outcome {
+	case submit.OutcomeSuccess:
+		out["status"] = "submitted"
+		out["broker_order_id"] = res.BrokerOrderID
+	case submit.OutcomeBadStatus:
+		out["error_code"] = "not_approved"
+		out["proposal_status"] = res.ProposalStatus
+	case submit.OutcomePolicyDenied:
+		out["error_code"] = "policy_denied"
+	default:
+		out["error_code"] = string(res.Outcome)
+		if res.BrokerDetail != "" {
+			out["detail"] = res.BrokerDetail
+		}
+	}
+	return encodeToolOutput(out)
 }

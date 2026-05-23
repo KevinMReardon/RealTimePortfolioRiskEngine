@@ -1,0 +1,17 @@
+{
+  "proposals": [
+    {
+      "strict_outcome": "ALLOW",
+      "effective_outcome": "ALLOW",
+      "policy_mode": "enforce",
+      "violations": []
+    },
+    {
+      "strict_outcome": "DENY",
+      "effective_outcome": "DENY",
+      "policy_mode": "enforce",
+      "violations": [{"code": "MAX_ORDER_NOTIONAL", "message": "too large"}]
+    }
+  ],
+  "period_returns": ["0.01", "-0.02", "0.015"]
+}

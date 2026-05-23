@@ -4,6 +4,10 @@
 .gomodcache/
 .DS_Store
 
+# Built binaries
+server
+alpaca-backfill
+
 # Next.js (web/)
 web/node_modules/
 web/.next/

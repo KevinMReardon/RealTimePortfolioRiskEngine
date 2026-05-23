@@ -2,6 +2,7 @@ package proposals
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func integrationDSN(t *testing.T) string {
 		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("set INTEGRATION_DATABASE_URL or TEST_DATABASE_URL to run integration tests (migrations including 000019 must be applied)")
+		t.Skip("set INTEGRATION_DATABASE_URL or TEST_DATABASE_URL to run integration tests (migrations including 000020 must be applied)")
 	}
 	return dsn
 }
@@ -110,6 +111,40 @@ func TestStore_proposal_lifecycle_and_anchors_integration(t *testing.T) {
 	if p.RowVersion != 1 {
 		t.Fatalf("row_version: %d", p.RowVersion)
 	}
+	if len(p.CriticVerdict) != 0 {
+		t.Fatalf("critic_verdict should be empty after insert")
+	}
+	if p.ApprovalSource != nil {
+		t.Fatalf("approval_source should be nil before approval")
+	}
+
+	verdict := json.RawMessage(`{"pass":true,"score":0.9}`)
+	cAt := time.Date(2020, 3, 1, 12, 0, 0, 0, time.UTC)
+	if err := store.SaveCriticVerdict(ctx, SaveCriticVerdictParams{
+		PortfolioID: portfolioID,
+		ProposalID:  p.ProposalID,
+		Verdict:     verdict,
+		CompletedAt: cAt,
+		Model:       "c-test-model",
+	}); err != nil {
+		t.Fatalf("SaveCriticVerdict: %v", err)
+	}
+	withCritic, err := store.GetByIDForPortfolio(ctx, portfolioID, p.ProposalID)
+	if err != nil {
+		t.Fatalf("Get after critic: %v", err)
+	}
+	if string(withCritic.CriticVerdict) != string(verdict) {
+		t.Fatalf("critic_verdict: %s", string(withCritic.CriticVerdict))
+	}
+	if withCritic.CriticModel == nil || *withCritic.CriticModel != "c-test-model" {
+		t.Fatalf("critic_model: %v", withCritic.CriticModel)
+	}
+	if withCritic.CriticCompletedAt == nil || !withCritic.CriticCompletedAt.Equal(cAt) {
+		t.Fatalf("critic_completed_at: %v", withCritic.CriticCompletedAt)
+	}
+	if withCritic.RowVersion != 1 {
+		t.Fatalf("row_version unchanged after critic: %d", withCritic.RowVersion)
+	}
 
 	list, err := store.ListByPortfolio(ctx, portfolioID, ListFilter{Status: strPtr("proposed")})
 	if err != nil {
@@ -147,6 +182,9 @@ func TestStore_proposal_lifecycle_and_anchors_integration(t *testing.T) {
 	if after.Status != "approved" {
 		t.Fatalf("after approve status = %q", after.Status)
 	}
+	if after.ApprovalSource == nil || *after.ApprovalSource != ApprovalSourceHuman {
+		t.Fatalf("approval_source: %v", after.ApprovalSource)
+	}
 	if after.RowVersion != 2 {
 		t.Fatalf("row_version should bump: %d", after.RowVersion)
 	}
@@ -177,6 +215,68 @@ func TestStore_proposal_lifecycle_and_anchors_integration(t *testing.T) {
 	}
 	if err := store.UpsertEquityAnchor(ctx, portfolioID, day, decimal.RequireFromString("100001")); err != nil {
 		t.Fatalf("UpsertEquityAnchor second: %v", err)
+	}
+}
+
+func TestStore_approve_proposal_auto(t *testing.T) {
+	ctx := context.Background()
+	pool := newPool(t)
+	repo := events.NewPostgresStore(pool)
+	store := NewStore(pool)
+	portfolioID := uuid.New()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM proposed_trades WHERE portfolio_id = $1`, portfolioID)
+		_, _ = pool.Exec(ctx, `DELETE FROM portfolios WHERE portfolio_id = $1`, portfolioID)
+	})
+	if _, err := repo.CreatePortfolio(ctx, portfolioID, "auto-approve-int", "USD"); err != nil {
+		t.Fatalf("CreatePortfolio: %v", err)
+	}
+	qtyAuto := decimal.RequireFromString("1")
+	intent := policy.Intent{
+		Symbol:      "MSFT",
+		Side:        domain.SideBuy,
+		Quantity:    &qtyAuto,
+		OrderType:   "market",
+		TimeInForce: "day",
+	}
+	snap := policy.Snapshot{
+		PortfolioEquity:     decimal.RequireFromString("100000"),
+		MarkPriceBySymbol:   map[string]decimal.Decimal{"MSFT": decimal.RequireFromString("400")},
+		PositionQtyBySymbol: map[string]decimal.Decimal{},
+		NowNY:               mustWednesdayNY(t),
+		EquityAnchor:        decimal.RequireFromString("100000"),
+	}
+	cfgAuto := policy.Config{Mode: policy.ModeEnforce, MaxOrderNotionalUSD: decimal.RequireFromString("1000000")}
+	decision := policy.Evaluate(intent, snap, cfgAuto)
+	p, err := store.InsertProposal(ctx, InsertParams{
+		PortfolioID: portfolioID,
+		Intent:      intent,
+		Decision:    decision,
+		Mode:        policy.ModeEnforce,
+	})
+	if err != nil {
+		t.Fatalf("InsertProposal: %v", err)
+	}
+	if err := store.ApproveProposalAuto(ctx, AutoApproveParams{
+		PortfolioID: portfolioID,
+		ProposalID:  p.ProposalID,
+		PayloadHash: p.PayloadHash,
+		RowVersion:  p.RowVersion,
+	}); err != nil {
+		t.Fatalf("ApproveProposalAuto: %v", err)
+	}
+	after, err := store.GetByIDForPortfolio(ctx, portfolioID, p.ProposalID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Status != "approved" {
+		t.Fatalf("status=%q", after.Status)
+	}
+	if after.ApprovedByUserID != nil {
+		t.Fatalf("approved_by_user_id should be nil: %v", after.ApprovedByUserID)
+	}
+	if after.ApprovalSource == nil || *after.ApprovalSource != ApprovalSourcePaperAuto {
+		t.Fatalf("approval_source=%v", after.ApprovalSource)
 	}
 }
 

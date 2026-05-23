@@ -11,6 +11,7 @@ import (
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 )
 
 type fakeToolDataSource struct {
@@ -79,7 +80,7 @@ func TestTools_GetPortfolioState_SuccessAndMissing(t *testing.T) {
 			},
 		},
 	}
-	d := NewToolDispatcher(ds, nil, nil)
+	d := NewToolDispatcher(ds, nil, nil, nil)
 	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
 
 	res, err := d.Execute(context.Background(), ToolCallRequest{SessionID: "s1", ToolName: ToolGetPortfolioState, Input: in})
@@ -118,7 +119,7 @@ func TestTools_GetRiskSnapshot_SuccessAndMissing(t *testing.T) {
 		},
 		sigma: map[string]decimal.Decimal{"AAPL": decimal.RequireFromString("0.02")},
 	}
-	d := NewToolDispatcher(ds, nil, nil)
+	d := NewToolDispatcher(ds, nil, nil, nil)
 	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
 	res, err := d.Execute(context.Background(), ToolCallRequest{SessionID: "s1", ToolName: ToolGetRiskSnapshot, Input: in})
 	if err != nil {
@@ -153,7 +154,7 @@ func TestTools_GetPriceHistory_SuccessAndMissing(t *testing.T) {
 			},
 		},
 	}
-	d := NewToolDispatcher(ds, nil, nil)
+	d := NewToolDispatcher(ds, nil, nil, nil)
 	res, err := d.Execute(context.Background(), ToolCallRequest{
 		SessionID: "s1", ToolName: ToolGetPriceHistory, Input: json.RawMessage(`{"symbol":"AAPL","limit":5}`),
 	})
@@ -179,7 +180,7 @@ func TestTools_GetPriceHistory_SuccessAndMissing(t *testing.T) {
 
 func TestTools_GetMarketNews_SuccessAndUnavailable(t *testing.T) {
 	t.Parallel()
-	dUnavailable := NewToolDispatcher(nil, nil, nil)
+	dUnavailable := NewToolDispatcher(nil, nil, nil, nil)
 	res, err := dUnavailable.Execute(context.Background(), ToolCallRequest{
 		SessionID: "s1", ToolName: ToolGetMarketNews, Input: json.RawMessage(`{"symbols":["AAPL"],"limit":2}`),
 	})
@@ -195,7 +196,7 @@ func TestTools_GetMarketNews_SuccessAndUnavailable(t *testing.T) {
 	news := &fakeNewsProvider{
 		items: []MarketNewsItem{{Title: "Headline", Summary: "Summary", Source: "wire", Published: "2026-04-26T00:00:00Z"}},
 	}
-	dConfigured := NewToolDispatcher(nil, nil, news)
+	dConfigured := NewToolDispatcher(nil, nil, news, nil)
 	res, err = dConfigured.Execute(context.Background(), ToolCallRequest{
 		SessionID: "s2", ToolName: ToolGetMarketNews, Input: json.RawMessage(`{"symbols":["AAPL"],"limit":2}`),
 	})
@@ -220,7 +221,7 @@ func TestTools_GetPositions_SuccessAndMissing(t *testing.T) {
 			},
 		},
 	}
-	d := NewToolDispatcher(ds, nil, nil)
+	d := NewToolDispatcher(ds, nil, nil, nil)
 	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
 	res, err := d.Execute(context.Background(), ToolCallRequest{SessionID: "s1", ToolName: ToolGetPositions, Input: in})
 	if err != nil {
@@ -244,7 +245,7 @@ func TestTools_GetPositions_SuccessAndMissing(t *testing.T) {
 func TestTools_GetBuyingPower_SuccessAndNotConfigured(t *testing.T) {
 	t.Parallel()
 	pid := uuid.New()
-	dNotConfigured := NewToolDispatcher(nil, nil, nil)
+	dNotConfigured := NewToolDispatcher(nil, nil, nil, nil)
 	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
 	res, err := dNotConfigured.Execute(context.Background(), ToolCallRequest{SessionID: "s1", ToolName: ToolGetBuyingPower, Input: in})
 	if err != nil {
@@ -257,7 +258,7 @@ func TestTools_GetBuyingPower_SuccessAndNotConfigured(t *testing.T) {
 	}
 
 	bp := &fakeBuyingPower{value: "10000.50", configured: true}
-	dConfigured := NewToolDispatcher(nil, bp, nil)
+	dConfigured := NewToolDispatcher(nil, bp, nil, nil)
 	res, err = dConfigured.Execute(context.Background(), ToolCallRequest{SessionID: "s2", ToolName: ToolGetBuyingPower, Input: in})
 	if err != nil {
 		t.Fatalf("get_buying_power configured err: %v", err)
@@ -278,7 +279,7 @@ func TestTools_RequestScopedMemoization(t *testing.T) {
 			Positions:   []portfolio.ProjectionRow{},
 		},
 	}
-	d := NewToolDispatcher(ds, nil, nil)
+	d := NewToolDispatcher(ds, nil, nil, nil)
 	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
 	call := ToolCallRequest{SessionID: "memo-session", ToolName: ToolGetPositions, Input: in}
 	_, err := d.Execute(context.Background(), call)
@@ -291,5 +292,30 @@ func TestTools_RequestScopedMemoization(t *testing.T) {
 	}
 	if ds.loadAssemblerCalls != 1 {
 		t.Fatalf("expected memoized single datasource call, got %d", ds.loadAssemblerCalls)
+	}
+}
+
+type stubSubmitter struct {
+	called bool
+}
+
+func (s *stubSubmitter) SubmitApproved(ctx context.Context, portfolioID, proposalID uuid.UUID) submit.Result {
+	s.called = true
+	return submit.Result{Outcome: submit.OutcomeSuccess, BrokerOrderID: "ord-1", ProposalID: proposalID}
+}
+
+func TestTools_SubmitProposal(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	propID := uuid.New()
+	sub := &stubSubmitter{}
+	d := NewToolDispatcher(nil, nil, nil, sub)
+	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `","proposal_id":"` + propID.String() + `"}`)
+	res, err := d.Execute(context.Background(), ToolCallRequest{ToolName: ToolSubmitProposal, Input: in})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !res.Success || !sub.called {
+		t.Fatalf("success=%v called=%v body=%s", res.Success, sub.called, string(res.Output))
 	}
 }

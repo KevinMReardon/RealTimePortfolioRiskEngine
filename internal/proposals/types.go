@@ -10,6 +10,12 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
+// Approval source for approved rows. NULL in DB = legacy or not set (see migration comments).
+const (
+	ApprovalSourceHuman     = "human"
+	ApprovalSourcePaperAuto = "paper_auto"
+)
+
 // Proposal is a row from proposed_trades.
 type Proposal struct {
 	ProposalID        uuid.UUID
@@ -45,6 +51,15 @@ type Proposal struct {
 	SubmittedAt      *time.Time
 	BrokerOrderID    *string
 	LastError        *string
+
+	// CriticVerdict is optional JSON from the self-critic pass (NULL when not run).
+	CriticVerdict json.RawMessage
+	// CriticCompletedAt is set when critic_verdict is written.
+	CriticCompletedAt *time.Time
+	// CriticModel is the model id used for the critic call (NULL if unknown / not set).
+	CriticModel *string
+	// ApprovalSource is human vs paper auto-approve; NULL for legacy rows or pre-approval.
+	ApprovalSource *string
 }
 
 // InsertParams builds a proposed_trades row after policy.Evaluate.
@@ -84,6 +99,14 @@ type ApproveParams struct {
 	RowVersion  int
 }
 
+// AutoApproveParams binds system paper-auto approval to payload_hash and row_version.
+type AutoApproveParams struct {
+	PortfolioID uuid.UUID
+	ProposalID  uuid.UUID
+	PayloadHash string
+	RowVersion  int
+}
+
 // DenyParams rejects a proposal in proposed status.
 type DenyParams struct {
 	PortfolioID uuid.UUID
@@ -92,4 +115,16 @@ type DenyParams struct {
 	PayloadHash string
 	RowVersion  int
 	DenyReason  string
+}
+
+// SaveCriticVerdictParams updates critic columns for a proposal (tenant-scoped).
+type SaveCriticVerdictParams struct {
+	PortfolioID uuid.UUID
+	ProposalID  uuid.UUID
+	// Verdict is JSON stored in critic_verdict (e.g. structured pass/fail from critic).
+	Verdict json.RawMessage
+	// CompletedAt is stored as critic_completed_at (UTC).
+	CompletedAt time.Time
+	// Model is optional critic model name; empty is stored as NULL.
+	Model string
 }

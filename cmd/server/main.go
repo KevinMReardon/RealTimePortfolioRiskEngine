@@ -16,12 +16,14 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/api"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca/universe"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/insights"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/risk"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -251,6 +253,33 @@ func run() error {
 		)
 	}
 
+	// Universe hydrator: runs once at startup then daily to populate top-150 liquid symbols.
+	// Only enabled when the price feed is on and Alpaca credentials are available.
+	universeKeyID := strings.TrimSpace(cfg.AlpacaPaperKeyID)
+	universeSecret := strings.TrimSpace(cfg.AlpacaPaperSecretKey)
+	if universeKeyID == "" {
+		universeKeyID = strings.TrimSpace(cfg.AlpacaLiveKeyID)
+		universeSecret = strings.TrimSpace(cfg.AlpacaLiveSecretKey)
+	}
+	if cfg.PriceFeedEnabled && universeKeyID != "" && universeSecret != "" {
+		hydrator := universe.NewHydrator(
+			universe.HydratorConfig{
+				DataBaseURL: cfg.AlpacaDataBaseURL,
+				KeyID:       universeKeyID,
+				SecretKey:   universeSecret,
+				Log:         logger,
+			},
+			repo,
+			priceFeedRunner,
+		)
+		universeCtx, universeCancel := context.WithCancel(workerCtx)
+		_ = universeCancel // cancelled when workerCtx is cancelled
+		go hydrator.RunLoop(universeCtx, 24*time.Hour)
+		logger.Info("universe_hydrator_spawned",
+			zap.Duration("interval", 24*time.Hour),
+		)
+	}
+
 	var ingestRL *api.PerIPRateLimiter
 	if cfg.RateLimitIngestEnabled {
 		ingestRL = api.NewPerIPRateLimiter(cfg.RateLimitIngestRPS, cfg.RateLimitIngestBurst)
@@ -299,8 +328,9 @@ func run() error {
 			logger.Warn("agent_briefing_disabled_missing_api_key")
 		} else {
 			anthropicClient := agent.NewHTTPAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL)
-			toolExec := agent.NewToolDispatcher(repo, nil, nil)
 			var proposalMaterializer agent.ProposalMaterializer
+			var paperAutoRunner *agent.PaperAutoRunner
+			var proposalSubmitter agent.ProposalSubmitter
 			if cfg.ProposalsRuntimeEnabled() && proposalStore != nil {
 				proposalMaterializer = &agent.BriefingProposalMaterializer{
 					Store:       proposalStore,
@@ -309,7 +339,43 @@ func run() error {
 					TradingHalt: cfg.TradingHalt,
 					Log:         logger,
 				}
+				submitDeps := submit.Deps{
+					Store:          proposalStore,
+					Read:           repo,
+					Keys:           repo,
+					Policy:         cfg.PolicyConfig(),
+					TradingHaltEnv: cfg.TradingHalt,
+					Log:            logger,
+					NewREST: func(c alpaca.RESTConfig) (alpaca.REST, error) {
+						return alpaca.NewREST(c)
+					},
+				}
+				proposalSubmitter = agent.NewProposalSubmitBridge(submitDeps)
+				if cfg.AgentPaperAutoRuntimeEnabled() {
+					criticModel := strings.TrimSpace(cfg.AgentCriticModel)
+					if criticModel == "" {
+						criticModel = cfg.AgentModel
+					}
+					paperAutoRunner = &agent.PaperAutoRunner{
+						Config: agent.PaperAutoConfig{
+							Enabled:              true,
+							Timeout:              cfg.AgentPaperAutoTimeout,
+							MaxSubmitsPerSession: cfg.AgentMaxAutoSubmitsPerSession,
+						},
+						Critic: &agent.Critic{
+							Client: anthropicClient,
+							Store:  proposalStore,
+							Model:  criticModel,
+							Log:    logger,
+						},
+						Submit: submitDeps,
+						Keys:   repo,
+						Store:  proposalStore,
+						Log:    logger,
+					}
+				}
 			}
+			toolExec := agent.NewToolDispatcher(repo, nil, nil, proposalSubmitter)
 			agentSvc = agent.NewServiceWithLoggerAndTimeout(
 				repo,
 				anthropicClient,
@@ -319,7 +385,8 @@ func run() error {
 				logger,
 				cfg.AgentSessionTimeout,
 				proposalMaterializer,
-			)
+				paperAutoRunner,
+			).WithLimits(cfg.AgentMaxTurns, cfg.AgentMaxToolCalls)
 			logger.Info("agent_briefing_enabled",
 				zap.String("provider", "anthropic"),
 				zap.String("model", cfg.AgentModel),
@@ -396,6 +463,7 @@ func run() error {
 		ProposalAlpacaKeys:        repo,
 		ProposalPolicy:            cfg.PolicyConfig(),
 		ProposalTradingHalt:       cfg.TradingHalt,
+		SettingsStore:             repo,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

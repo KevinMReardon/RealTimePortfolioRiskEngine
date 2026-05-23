@@ -11,7 +11,6 @@ import (
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
@@ -167,7 +166,7 @@ func FromProposal(ctx context.Context, deps Deps, prop proposals.Proposal, opts 
 		return Result{Outcome: OutcomeError, ProposalID: propID}
 	}
 	killEnv, killDB := proposals.KillSwitchInputs(deps.TradingHaltEnv, dbKillActive, dbKillPresent)
-	snap := agent.BuildPolicySnapshot(inAsm, equityAnchor, nowNY, killEnv, killDB)
+	snap := policy.BuildSnapshot(inAsm, equityAnchor, nowNY, killEnv, killDB)
 	snap.OptionalBroker = &policy.BrokerAccountSnapshot{
 		PatternDayTrader: acct.PatternDayTrader,
 		TradingBlocked:   acct.TradingBlocked,

@@ -76,7 +76,32 @@ func TestRunScheduledBriefingTick_InvokesCreateBriefingScheduledPerEligible(t *t
 	}
 }
 
-func TestRunScheduledBriefingTick_DuplicateSuppressedWhenScheduledExistsForUTCDate(t *testing.T) {
+func TestRunScheduledBriefingTick_DuplicateSuppressedWhenSessionRunning(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	owner := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		list: []events.AgentSession{
+			{
+				SessionID:     uuid.New(),
+				PortfolioID:   pid,
+				TriggerSource: "scheduled",
+				RunDate:       now,
+				// A running session should suppress the next tick to avoid concurrent duplicates.
+				Status: "running",
+			},
+		},
+	}
+	svc := NewService(store, &mockAnthropicClient{}, &mockToolExecutor{}, "anthropic", "claude-test")
+	cat := stubEligibilityLister{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: pid, OwnerUserID: owner}}}
+	RunScheduledBriefingTick(context.Background(), zap.NewNop(), svc, cat)
+	if store.createCalls != 0 {
+		t.Fatalf("expected skip when session running (no new session), createCalls=%d", store.createCalls)
+	}
+}
+
+func TestRunScheduledBriefingTick_AllowsNewRunAfterPreviousSucceeded(t *testing.T) {
 	t.Parallel()
 	pid := uuid.New()
 	owner := uuid.New()
@@ -93,11 +118,21 @@ func TestRunScheduledBriefingTick_DuplicateSuppressedWhenScheduledExistsForUTCDa
 			},
 		},
 	}
-	svc := NewService(store, &mockAnthropicClient{}, &mockToolExecutor{}, "anthropic", "claude-test")
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{"market_summary":"m","portfolio_context":"p","trade_ideas":[],"risks_and_caveats":"r","data_gaps":[],"disclaimer":"d","used_sources":[],"used_fields":[]}`,
+				Raw:        []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	svc := NewService(store, client, &mockToolExecutor{}, "anthropic", "claude-test")
 	cat := stubEligibilityLister{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: pid, OwnerUserID: owner}}}
 	RunScheduledBriefingTick(context.Background(), zap.NewNop(), svc, cat)
-	if store.createCalls != 0 {
-		t.Fatalf("expected idempotent skip (no new session), createCalls=%d", store.createCalls)
+	// A completed session should NOT suppress the next hourly tick.
+	if store.createCalls != 1 {
+		t.Fatalf("expected new session after previous succeeded, createCalls=%d", store.createCalls)
 	}
 }
 

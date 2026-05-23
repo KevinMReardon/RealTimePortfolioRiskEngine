@@ -86,6 +86,9 @@ type RouterConfig struct {
 	ProposalPolicy policy.Config
 	// ProposalTradingHalt mirrors env kill-switch OR semantics with DB kill rows for submit-time policy.
 	ProposalTradingHalt bool
+
+	// SettingsStore enables GET/PATCH /v1/settings when non-nil.
+	SettingsStore SettingsStore
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -209,6 +212,15 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			))
 		}
 	}
+	if cfg.SettingsStore != nil {
+		settings := router.Group("/v1")
+		if cfg.AuthStore != nil {
+			settings.Use(requireAuth(cfg.AuthStore))
+		}
+		settings.GET("/settings", getSettingsHandler(cfg.SettingsStore))
+		settings.PATCH("/settings", patchSettingsHandler(cfg.SettingsStore))
+	}
+
 	if cfg.AuthStore != nil {
 		auth := router.Group("/v1/auth")
 		auth.Use(PerIPRateLimitMiddleware(cfg.RateLimitIngest))

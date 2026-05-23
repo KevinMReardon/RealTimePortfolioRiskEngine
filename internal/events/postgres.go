@@ -870,6 +870,56 @@ func (s *PostgresStore) UpsertPriceFeedWatchlist(ctx context.Context, watchlist 
 	return nil
 }
 
+// GetAppSetting loads a single value from app_settings by key.
+// Returns (nil, false, nil) when the key does not exist.
+func (s *PostgresStore) GetAppSetting(ctx context.Context, key string) (json.RawMessage, bool, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT setting_value FROM app_settings WHERE setting_key = $1
+	`, key).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get app_setting %q: %w", key, err)
+	}
+	return json.RawMessage(raw), true, nil
+}
+
+// UpsertAppSetting writes a value into app_settings, creating or replacing the row.
+func (s *PostgresStore) UpsertAppSetting(ctx context.Context, key string, value json.RawMessage) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO app_settings (setting_key, setting_value, updated_at)
+		VALUES ($1, $2::jsonb, NOW())
+		ON CONFLICT (setting_key) DO UPDATE SET
+			setting_value = EXCLUDED.setting_value,
+			updated_at = NOW()
+	`, key, []byte(value))
+	if err != nil {
+		return fmt.Errorf("upsert app_setting %q: %w", key, err)
+	}
+	return nil
+}
+
+// ListAppSettings returns all rows in app_settings as a key→value map.
+func (s *PostgresStore) ListAppSettings(ctx context.Context) (map[string]json.RawMessage, error) {
+	rows, err := s.pool.Query(ctx, `SELECT setting_key, setting_value FROM app_settings ORDER BY setting_key`)
+	if err != nil {
+		return nil, fmt.Errorf("list app_settings: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]json.RawMessage)
+	for rows.Next() {
+		var k string
+		var v []byte
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan app_setting: %w", err)
+		}
+		out[k] = json.RawMessage(v)
+	}
+	return out, rows.Err()
+}
+
 func normalizeWatchlistSymbols(symbols []string) []string {
 	out := make([]string, 0, len(symbols))
 	seen := make(map[string]struct{}, len(symbols))

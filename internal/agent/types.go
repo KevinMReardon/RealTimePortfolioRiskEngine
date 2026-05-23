@@ -65,7 +65,7 @@ type BriefingIdea struct {
 
 // ProposalMaterializer persists evaluated proposed_trades after a successful briefing (optional on Service).
 type ProposalMaterializer interface {
-	Materialize(ctx context.Context, portfolioID, sessionID uuid.UUID, out BriefingOutput) error
+	Materialize(ctx context.Context, portfolioID, sessionID uuid.UUID, out BriefingOutput) ([]uuid.UUID, error)
 }
 
 type RunBriefingRequest struct {

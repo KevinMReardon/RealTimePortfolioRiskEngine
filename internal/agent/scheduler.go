@@ -135,6 +135,12 @@ func RunScheduledBriefingTick(ctx context.Context, log *zap.Logger, svc AgentSer
 		log.Warn("agent_briefing_eligible_list_failed", zap.Error(err))
 		return
 	}
+	if len(rows) == 0 {
+		log.Warn("agent_briefing_no_eligible_portfolios",
+			zap.String("hint", "no portfolios with owner_user_id set; scheduled briefings will not run"),
+		)
+		return
+	}
 	runDate := time.Now().UTC()
 	for _, row := range rows {
 		owner := row.OwnerUserID

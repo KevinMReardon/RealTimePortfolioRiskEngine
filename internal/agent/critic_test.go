@@ -1,0 +1,81 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
+)
+
+type fakeCriticStore struct {
+	prop      proposals.Proposal
+	saved     bool
+	lastVerdict json.RawMessage
+}
+
+func (f *fakeCriticStore) GetByIDForPortfolio(ctx context.Context, portfolioID, proposalID uuid.UUID) (proposals.Proposal, error) {
+	return f.prop, nil
+}
+
+func (f *fakeCriticStore) SaveCriticVerdict(ctx context.Context, p proposals.SaveCriticVerdictParams) error {
+	f.saved = true
+	f.lastVerdict = append(json.RawMessage(nil), p.Verdict...)
+	return nil
+}
+
+func TestParseCriticVerdict(t *testing.T) {
+	t.Parallel()
+	v, err := parseCriticVerdict(`{"allow":true,"reason_code":"ok","notes":"fine"}`)
+	if err != nil || !v.Allow || v.ReasonCode != "ok" {
+		t.Fatalf("got %+v err=%v", v, err)
+	}
+	v2, err := parseCriticVerdict("Here is the result:\n{\"allow\":false,\"reason_code\":\"risk\",\"notes\":\"no\"}")
+	if err != nil || v2.Allow {
+		t.Fatalf("got %+v", v2)
+	}
+	_, err = parseCriticVerdict("not json")
+	if err == nil {
+		t.Fatal("want error")
+	}
+}
+
+func TestCriticReview_VetoOnParseFailure(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	propID := uuid.New()
+	store := &fakeCriticStore{prop: proposals.Proposal{
+		ProposalID:  propID,
+		PortfolioID: pid,
+		Symbol:      "AAPL",
+		Side:        "BUY",
+		PolicyResult: mustPolicyJSON(t, policy.OutcomeAllow),
+	}}
+	client := &mockAnthropicClient{responses: []AnthropicMessageResponse{{
+		OutputText: "not-json",
+	}}}
+	c := &Critic{Client: client, Store: store, Model: "test"}
+	v, err := c.Review(context.Background(), pid, propID)
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if v.Allow || !store.saved {
+		t.Fatalf("verdict=%+v saved=%v", v, store.saved)
+	}
+}
+
+func mustPolicyJSON(t *testing.T, out policy.Outcome) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(proposals.PolicyResultRecord{
+		StrictOutcome:    out,
+		EffectiveOutcome: out,
+		PolicyMode:       policy.ModeEnforce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

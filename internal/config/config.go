@@ -42,7 +42,7 @@ const (
 	defaultAlpacaImportTimeoutSec = 7200
 	defaultAlpacaDataBaseURL      = "https://data.alpaca.markets"
 	defaultPriceFeedAlpacaRPM     = 200
-	defaultAgentBriefingCron      = "0 13 * * 1-5"
+	defaultAgentBriefingCron      = "0 9-16 * * 1-5"
 	defaultAgentBriefingTZ        = "America/New_York"
 	defaultAgentModel             = "claude-sonnet-4.6"
 	defaultAgentMaxTokens         = 2048
@@ -682,6 +682,11 @@ func (c Config) AgentBriefingSchedulerRuntimeEnabled() bool {
 // ProposalsRuntimeEnabled reports whether Phase 2 proposal store and related paths should be active.
 func (c Config) ProposalsRuntimeEnabled() bool {
 	return c.ProposalsEnabled
+}
+
+// AgentPaperAutoRuntimeEnabled reports whether post-briefing autonomous paper submit is active.
+func (c Config) AgentPaperAutoRuntimeEnabled() bool {
+	return c.AgentExecMode == AgentExecModePaperAuto
 }
 
 // PolicyConfig builds internal/policy.Config from loaded env (for Evaluate and proposal persistence).

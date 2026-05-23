@@ -164,7 +164,8 @@ const selectProposalSQL = `
 			status, row_version,
 			created_at, updated_at,
 			approved_by_user_id::text, approved_at, denied_by_user_id::text, deny_reason,
-			submitted_at, broker_order_id, last_error
+			submitted_at, broker_order_id, last_error,
+			critic_verdict, critic_completed_at, critic_model, approval_source
 		FROM proposed_trades
 `
 
@@ -214,13 +215,14 @@ func (s *Store) ApproveProposal(ctx context.Context, p ApproveParams) error {
 			status = 'approved',
 			approved_by_user_id = $1,
 			approved_at = NOW(),
+			approval_source = $6,
 			row_version = row_version + 1,
 			updated_at = NOW()
 		WHERE proposal_id = $2 AND portfolio_id = $3
 		  AND status = 'proposed'
 		  AND payload_hash = $4
 		  AND row_version = $5
-	`, p.UserID, p.ProposalID, p.PortfolioID, p.PayloadHash, p.RowVersion)
+	`, p.UserID, p.ProposalID, p.PortfolioID, p.PayloadHash, p.RowVersion, ApprovalSourceHuman)
 	if err != nil {
 		return fmt.Errorf("proposals: approve update: %w", err)
 	}
@@ -233,6 +235,77 @@ func (s *Store) ApproveProposal(ctx context.Context, p ApproveParams) error {
 			zap.String("proposal_id", p.ProposalID.String()),
 			zap.String("portfolio_id", p.PortfolioID.String()),
 			zap.String("approved_by_user_id", p.UserID.String()),
+		)
+	}
+	return nil
+}
+
+// ApproveProposalAuto transitions proposed → approved for autonomous paper execution (no human user).
+func (s *Store) ApproveProposalAuto(ctx context.Context, p AutoApproveParams) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			status = 'approved',
+			approved_by_user_id = NULL,
+			approved_at = NOW(),
+			approval_source = $4,
+			row_version = row_version + 1,
+			updated_at = NOW()
+		WHERE proposal_id = $1 AND portfolio_id = $2
+		  AND status = 'proposed'
+		  AND payload_hash = $3
+		  AND row_version = $5
+	`, p.ProposalID, p.PortfolioID, p.PayloadHash, ApprovalSourcePaperAuto, p.RowVersion)
+	if err != nil {
+		return fmt.Errorf("proposals: auto approve update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrApproveConflict
+	}
+	observability.IncProposedTradeTransition("proposed", "approved")
+	if s.log != nil {
+		s.log.Info("proposal_auto_approved",
+			zap.String("proposal_id", p.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
+			zap.String("approval_source", ApprovalSourcePaperAuto),
+		)
+	}
+	return nil
+}
+
+// SaveCriticVerdict sets critic JSON, completion time, and model for a proposal (tenant-scoped).
+func (s *Store) SaveCriticVerdict(ctx context.Context, p SaveCriticVerdictParams) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	if len(p.Verdict) == 0 {
+		return fmt.Errorf("proposals: critic verdict required")
+	}
+	var modelArg interface{}
+	if m := strings.TrimSpace(p.Model); m != "" {
+		modelArg = m
+	}
+	t := p.CompletedAt.UTC()
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			critic_verdict = $3,
+			critic_completed_at = $4,
+			critic_model = $5,
+			updated_at = NOW()
+		WHERE proposal_id = $2 AND portfolio_id = $1
+	`, p.PortfolioID, p.ProposalID, p.Verdict, t, modelArg)
+	if err != nil {
+		return fmt.Errorf("proposals: save critic verdict: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProposalNotFound
+	}
+	if s.log != nil {
+		s.log.Info("proposal_critic_verdict_saved",
+			zap.String("proposal_id", p.ProposalID.String()),
+			zap.String("portfolio_id", p.PortfolioID.String()),
 		)
 	}
 	return nil
@@ -463,6 +536,9 @@ func scanProposal(sc rowScanner) (Proposal, error) {
 	var approvedAt, submittedAt sql.NullTime
 	var brokerID, denyReason, lastErr sql.NullString
 	var policyRaw []byte
+	var criticRaw []byte
+	var criticAt sql.NullTime
+	var criticModel, approvalSrc sql.NullString
 
 	err := sc.Scan(
 		&p.ProposalID, &p.PortfolioID,
@@ -474,6 +550,7 @@ func scanProposal(sc rowScanner) (Proposal, error) {
 		&p.CreatedAt, &p.UpdatedAt,
 		&approvedBy, &approvedAt, &deniedBy, &denyReason,
 		&submittedAt, &brokerID, &lastErr,
+		&criticRaw, &criticAt, &criticModel, &approvalSrc,
 	)
 	if err != nil {
 		return Proposal{}, err
@@ -528,6 +605,16 @@ func scanProposal(sc rowScanner) (Proposal, error) {
 	}
 	p.BrokerOrderID = nullableStringFromSQL(brokerID)
 	p.LastError = nullableStringFromSQL(lastErr)
+
+	if len(criticRaw) > 0 {
+		p.CriticVerdict = json.RawMessage(append(json.RawMessage(nil), criticRaw...))
+	}
+	if criticAt.Valid {
+		t := criticAt.Time.UTC()
+		p.CriticCompletedAt = &t
+	}
+	p.CriticModel = nullableStringFromSQL(criticModel)
+	p.ApprovalSource = nullableStringFromSQL(approvalSrc)
 
 	p.CreatedAt = p.CreatedAt.UTC()
 	p.UpdatedAt = p.UpdatedAt.UTC()

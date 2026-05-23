@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -14,18 +16,22 @@ type proposalListResponse struct {
 }
 
 type proposalJSON struct {
-	ProposalID        string  `json:"proposal_id"`
-	PortfolioID       string  `json:"portfolio_id"`
-	AgentSessionID    *string `json:"agent_session_id,omitempty"`
-	TradeIdeaIndex    *int    `json:"trade_idea_index,omitempty"`
-	Symbol            string  `json:"symbol"`
-	Side              string  `json:"side"`
-	Status            string  `json:"status"`
-	RowVersion        int     `json:"row_version"`
-	PayloadHash       string  `json:"payload_hash"`
-	PolicyInputsHash  string  `json:"policy_inputs_hash"`
-	PolicyConfigHash  string  `json:"policy_config_hash"`
-	RationaleSnapshot *string `json:"rationale_snapshot,omitempty"`
+	ProposalID        string          `json:"proposal_id"`
+	PortfolioID       string          `json:"portfolio_id"`
+	AgentSessionID    *string         `json:"agent_session_id,omitempty"`
+	TradeIdeaIndex    *int            `json:"trade_idea_index,omitempty"`
+	Symbol            string          `json:"symbol"`
+	Side              string          `json:"side"`
+	Status            string          `json:"status"`
+	RowVersion        int             `json:"row_version"`
+	PayloadHash       string          `json:"payload_hash"`
+	PolicyInputsHash  string          `json:"policy_inputs_hash"`
+	PolicyConfigHash  string          `json:"policy_config_hash"`
+	RationaleSnapshot *string         `json:"rationale_snapshot,omitempty"`
+	CriticVerdict     json.RawMessage `json:"critic_verdict,omitempty"`
+	CriticCompletedAt *string         `json:"critic_completed_at,omitempty"`
+	CriticModel       *string         `json:"critic_model,omitempty"`
+	ApprovalSource    *string         `json:"approval_source,omitempty"`
 }
 
 type proposalApproveRequest struct {
@@ -41,15 +47,15 @@ type proposalDenyRequest struct {
 
 func proposalToJSON(p proposals.Proposal) proposalJSON {
 	out := proposalJSON{
-		ProposalID:       p.ProposalID.String(),
-		PortfolioID:      p.PortfolioID.String(),
-		Symbol:           p.Symbol,
-		Side:             p.Side,
-		Status:           p.Status,
-		RowVersion:       p.RowVersion,
-		PayloadHash:      p.PayloadHash,
-		PolicyInputsHash: p.PolicyInputsHash,
-		PolicyConfigHash: p.PolicyConfigHash,
+		ProposalID:        p.ProposalID.String(),
+		PortfolioID:       p.PortfolioID.String(),
+		Symbol:            p.Symbol,
+		Side:              p.Side,
+		Status:            p.Status,
+		RowVersion:        p.RowVersion,
+		PayloadHash:       p.PayloadHash,
+		PolicyInputsHash:  p.PolicyInputsHash,
+		PolicyConfigHash:  p.PolicyConfigHash,
 		RationaleSnapshot: p.RationaleSnapshot,
 	}
 	if p.AgentSessionID != nil {
@@ -57,6 +63,15 @@ func proposalToJSON(p proposals.Proposal) proposalJSON {
 		out.AgentSessionID = &s
 	}
 	out.TradeIdeaIndex = p.TradeIdeaIndex
+	if len(p.CriticVerdict) > 0 {
+		out.CriticVerdict = append(json.RawMessage(nil), p.CriticVerdict...)
+	}
+	if p.CriticCompletedAt != nil {
+		s := p.CriticCompletedAt.UTC().Format(time.RFC3339Nano)
+		out.CriticCompletedAt = &s
+	}
+	out.CriticModel = p.CriticModel
+	out.ApprovalSource = p.ApprovalSource
 	return out
 }
 
