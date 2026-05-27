@@ -43,9 +43,9 @@ export function SymbolLookupPanel() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-lg">Symbol lookup</CardTitle>
+        <CardTitle className="text-base">Symbol lookup</CardTitle>
         <CardDescription>
-          Query the latest projected mark and a short daily-return history.
+          Latest projected mark and a short daily-return history.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

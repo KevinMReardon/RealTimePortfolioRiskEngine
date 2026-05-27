@@ -6,6 +6,7 @@ import { Wrench } from "lucide-react";
 import { FeedStatusCard } from "@/components/prices/feed-status-card";
 import { SymbolLookupPanel } from "@/components/prices/symbol-lookup-panel";
 import { TrackedPricesTable } from "@/components/prices/tracked-prices-table";
+import { WatchlistCard } from "@/components/prices/watchlist-card";
 import {
   Card,
   CardContent,
@@ -16,44 +17,35 @@ import {
 
 export function PriceDataDashboard() {
   return (
-    <div className="space-y-8">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Price data</h1>
-        <p className="text-sm text-muted-foreground">
-          Read-only view of projected marks, daily return history, and automated feed health.
-        </p>
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Price data</h1>
+          <p className="text-sm text-muted-foreground">
+            Projected marks, daily-return history, and automated feed health.
+          </p>
+        </div>
+        <Link
+          href="/ingest/price/manual"
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          <Wrench className="h-3.5 w-3.5" aria-hidden />
+          Manual ingestion
+        </Link>
       </div>
 
-      <FeedStatusCard />
-
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <FeedStatusCard />
         <SymbolLookupPanel />
-        <Card className="border-dashed">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Wrench className="h-4 w-4" aria-hidden />
-              Manual ingestion
-            </CardTitle>
-            <CardDescription>
-              Admin and debug fallback only — not part of routine workflows.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Link
-              href="/ingest/price/manual"
-              className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Open manual price form
-            </Link>
-          </CardContent>
-        </Card>
       </div>
+
+      <WatchlistCard />
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-lg">All tracked symbols</CardTitle>
+          <CardTitle className="text-base">All tracked symbols</CardTitle>
           <CardDescription>
-            Server-backed pagination and sorting. Filter runs as you type (short debounce).
+            Server-backed pagination and sorting. Filter runs as you type.
           </CardDescription>
         </CardHeader>
         <CardContent>
