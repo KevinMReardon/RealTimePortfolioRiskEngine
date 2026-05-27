@@ -29,7 +29,7 @@ func TestHydrator_Run_FetchesAndPersists(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v2/screener/stocks/most-actives" {
+		if r.URL.Path != "/v1beta1/screener/stocks/most-actives" {
 			http.NotFound(w, r)
 			return
 		}
@@ -121,5 +121,18 @@ func TestHydrator_Run_EmptyResponse(t *testing.T) {
 	}
 	if len(p.saved) != 0 {
 		t.Fatalf("expected no persistence for empty response, got %v", p.saved)
+	}
+}
+
+func TestClampTop(t *testing.T) {
+	t.Parallel()
+	if got := clampTop(0); got != 100 {
+		t.Fatalf("clampTop(0) = %d, want 100", got)
+	}
+	if got := clampTop(150); got != 100 {
+		t.Fatalf("clampTop(150) = %d, want 100", got)
+	}
+	if got := clampTop(50); got != 50 {
+		t.Fatalf("clampTop(50) = %d, want 50", got)
 	}
 }

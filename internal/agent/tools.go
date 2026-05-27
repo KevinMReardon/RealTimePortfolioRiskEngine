@@ -53,10 +53,17 @@ const (
 	ToolGetMarketNews     = "get_market_news"
 	ToolGetPositions      = "get_positions"
 	ToolGetBuyingPower    = "get_buying_power"
-	ToolSubmitProposal    = "submit_proposal"
+	ToolGetWatchlist              = "get_watchlist"
+	ToolGetWatchlistMarketSnapshot = "get_watchlist_market_snapshot"
+	ToolSubmitProposal            = "submit_proposal"
 )
 
 func ToolDefinitions() []ToolDefinition {
+	base := baseToolDefinitions()
+	return append(base, researchToolDefinitions()...)
+}
+
+func baseToolDefinitions() []ToolDefinition {
 	return []ToolDefinition{
 		{
 			Name: ToolGetPortfolioState,
@@ -142,6 +149,28 @@ func ToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
+			Name: ToolGetWatchlist,
+			Description: "Return symbol names on the price-feed watchlist (no prices). Prefer get_watchlist_market_snapshot for briefing scans.",
+			InputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties":          map[string]any{},
+			},
+		},
+		{
+			Name: ToolGetWatchlistMarketSnapshot,
+			Description: "Return latest price and daily change for every watchlist symbol, with held flags vs portfolio. " +
+				"Use this to compare opportunities across the full tracked universe, not only current holdings.",
+			InputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"portfolio_id": map[string]any{"type": "string", "format": "uuid"},
+				},
+				"required": []string{"portfolio_id"},
+			},
+		},
+		{
 			Name: ToolSubmitProposal,
 			Description: "Submit an already human- or system-approved proposal to the broker via the server submit pipeline. " +
 				"Requires proposal_id and portfolio_id. Does not place orders without an approved proposal row; never exposes broker credentials.",
@@ -171,10 +200,16 @@ func AnthropicToolCatalog() []AnthropicToolSpec {
 	return out
 }
 
+// WatchlistReader returns the live price-feed watchlist.
+type WatchlistReader interface {
+	Watchlist() []string
+}
+
 type ToolDataSource interface {
 	LoadPortfolioAssemblerInput(ctx context.Context, portfolioID uuid.UUID) (portfolio.PortfolioAssemblerInput, bool, error)
 	LoadSymbolSigma1D(ctx context.Context, symbols []string, windowN int) (map[string]decimal.Decimal, error)
 	GetPriceSymbolDetail(ctx context.Context, symbol string, historyLimit int) (*events.PriceSymbolDetail, bool, error)
+	ListPriceMarks(ctx context.Context, p events.ListPriceMarksParams) (events.ListPriceMarksResult, error)
 }
 
 type BuyingPowerProvider interface {
@@ -198,10 +233,19 @@ type ToolDispatcher struct {
 	buyingPower        BuyingPowerProvider
 	marketNewsProvider MarketNewsProvider
 	proposalSubmitter  ProposalSubmitter
+	watchlistReader    WatchlistReader
+	barsProvider       DailyBarsProvider
 
 	mu    sync.Mutex
-	cache map[string]ToolCallResult
+	cache map[string]toolCacheEntry
 }
+
+type toolCacheEntry struct {
+	result    ToolCallResult
+	expiresAt time.Time
+}
+
+const toolCacheTTL = 30 * time.Minute
 
 func NewToolDispatcher(dataSource ToolDataSource, buyingPower BuyingPowerProvider, marketNewsProvider MarketNewsProvider, proposalSubmitter ProposalSubmitter) *ToolDispatcher {
 	return &ToolDispatcher{
@@ -209,8 +253,13 @@ func NewToolDispatcher(dataSource ToolDataSource, buyingPower BuyingPowerProvide
 		buyingPower:        buyingPower,
 		marketNewsProvider: marketNewsProvider,
 		proposalSubmitter:  proposalSubmitter,
-		cache:              make(map[string]ToolCallResult),
+		cache:              make(map[string]toolCacheEntry),
 	}
+}
+
+func (d *ToolDispatcher) WithWatchlist(r WatchlistReader) *ToolDispatcher {
+	d.watchlistReader = r
+	return d
 }
 
 func (d *ToolDispatcher) Execute(ctx context.Context, call ToolCallRequest) (ToolCallResult, error) {
@@ -219,9 +268,10 @@ func (d *ToolDispatcher) Execute(ctx context.Context, call ToolCallRequest) (Too
 	}
 	cacheKey := d.memoKey(call)
 	d.mu.Lock()
+	d.cleanupExpiredLocked(time.Now().UTC())
 	if cached, ok := d.cache[cacheKey]; ok {
 		d.mu.Unlock()
-		return cached, nil
+		return cached.result, nil
 	}
 	d.mu.Unlock()
 
@@ -243,9 +293,35 @@ func (d *ToolDispatcher) Execute(ctx context.Context, call ToolCallRequest) (Too
 		result.Success = false
 	}
 	d.mu.Lock()
-	d.cache[cacheKey] = result
+	d.cache[cacheKey] = toolCacheEntry{
+		result:    result,
+		expiresAt: time.Now().UTC().Add(toolCacheTTL),
+	}
 	d.mu.Unlock()
 	return result, err
+}
+
+// ClearSessionCache removes all memoized tool outputs for one agent session.
+func (d *ToolDispatcher) ClearSessionCache(sessionID string) {
+	if d == nil {
+		return
+	}
+	prefix := strings.TrimSpace(sessionID) + "|"
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key := range d.cache {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.cache, key)
+		}
+	}
+}
+
+func (d *ToolDispatcher) cleanupExpiredLocked(now time.Time) {
+	for key, entry := range d.cache {
+		if !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
+			delete(d.cache, key)
+		}
+	}
 }
 
 func (d *ToolDispatcher) memoKey(call ToolCallRequest) string {
@@ -266,8 +342,18 @@ func (d *ToolDispatcher) executeUncached(ctx context.Context, call ToolCallReque
 		return d.getPositions(ctx, call.Input)
 	case ToolGetBuyingPower:
 		return d.getBuyingPower(ctx, call.Input)
+	case ToolGetWatchlist:
+		return d.getWatchlist(ctx, call.Input)
+	case ToolGetWatchlistMarketSnapshot:
+		return d.getWatchlistMarketSnapshot(ctx, call.Input)
 	case ToolSubmitProposal:
 		return d.submitProposal(ctx, call.Input)
+	case ToolGetDailyBars:
+		return d.getDailyBars(ctx, call.Input)
+	case ToolGetTechnicalIndicators:
+		return d.getTechnicalIndicators(ctx, call.Input)
+	case ToolGetMarketRegime:
+		return d.getMarketRegime(ctx, call.Input)
 	default:
 		return ToolCallResult{
 			Output:  json.RawMessage(`{"status":"error","error_code":"unknown_tool"}`),
@@ -543,6 +629,43 @@ func (d *ToolDispatcher) getBuyingPower(ctx context.Context, raw json.RawMessage
 type submitProposalInput struct {
 	PortfolioID string `json:"portfolio_id"`
 	ProposalID  string `json:"proposal_id"`
+}
+
+func (d *ToolDispatcher) getWatchlistMarketSnapshot(ctx context.Context, raw json.RawMessage) (ToolCallResult, error) {
+	pid, err := parsePortfolioIDInput(raw)
+	if err != nil {
+		return ToolCallResult{Output: json.RawMessage(`{"status":"error","error_code":"invalid_input"}`), Error: err.Error()}, err
+	}
+	if d.dataSource == nil {
+		return encodeToolOutput(map[string]any{"status": "unavailable", "reason": "data_source_not_configured"})
+	}
+	snap, err := d.MarketSnapshotJSON(ctx, pid)
+	if err != nil {
+		return ToolCallResult{Output: json.RawMessage(`{"status":"error","error_code":"snapshot_failed"}`), Error: err.Error()}, err
+	}
+	var payload any
+	_ = json.Unmarshal(snap, &payload)
+	return encodeToolOutput(map[string]any{"status": "ok", "portfolio_id": pid.String(), "snapshot": payload})
+}
+
+func (d *ToolDispatcher) getWatchlist(_ context.Context, _ json.RawMessage) (ToolCallResult, error) {
+	if d.watchlistReader == nil {
+		return encodeToolOutput(map[string]any{
+			"status":  "unavailable",
+			"reason":  "not_configured",
+			"symbols": []string{},
+			"count":   0,
+		})
+	}
+	symbols := d.watchlistReader.Watchlist()
+	if symbols == nil {
+		symbols = []string{}
+	}
+	return encodeToolOutput(map[string]any{
+		"status":  "ok",
+		"symbols": symbols,
+		"count":   len(symbols),
+	})
 }
 
 func (d *ToolDispatcher) submitProposal(ctx context.Context, raw json.RawMessage) (ToolCallResult, error) {

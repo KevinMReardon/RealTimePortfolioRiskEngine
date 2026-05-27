@@ -4,6 +4,7 @@ package submit
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -165,13 +166,21 @@ func FromProposal(ctx context.Context, deps Deps, prop proposals.Proposal, opts 
 	if err != nil {
 		return Result{Outcome: OutcomeError, ProposalID: propID}
 	}
-	killEnv, killDB := proposals.KillSwitchInputs(deps.TradingHaltEnv, dbKillActive, dbKillPresent)
+	pol, tradingHalt := deps.effectivePolicyAndHalt()
+	killEnv, killDB := proposals.KillSwitchInputs(tradingHalt, dbKillActive, dbKillPresent)
 	snap := policy.BuildSnapshot(inAsm, equityAnchor, nowNY, killEnv, killDB)
-	snap.OptionalBroker = &policy.BrokerAccountSnapshot{
+	policy.ApplyBrokerAccount(&snap, policy.BrokerAccountSnapshot{
 		PatternDayTrader: acct.PatternDayTrader,
 		TradingBlocked:   acct.TradingBlocked,
 		AccountBlocked:   acct.AccountBlocked,
 		Equity:           acct.Equity,
+	})
+	if deps.Usage != nil {
+		if dailyNotional, ordersLastMin, err := deps.Usage.LoadDailyUsage(ctx, pid, nowNY); err == nil {
+			policy.ApplyDailyUsage(&snap, dailyNotional, ordersLastMin)
+		} else {
+			log.Warn("proposal_submit_daily_usage_failed", zap.Error(err), zap.String("portfolio_id", pid.String()))
+		}
 	}
 
 	intent, err := proposals.IntentFromProposal(prop)
@@ -179,7 +188,7 @@ func FromProposal(ctx context.Context, deps Deps, prop proposals.Proposal, opts 
 		log.Info("proposal_submit_rejected", zap.String("reason", "bad_intent"), zap.Error(err))
 		return Result{Outcome: OutcomeBadIntent, ProposalID: propID, ValidationMsg: err.Error()}
 	}
-	dec := policy.EvaluateForBrokerSubmit(intent, snap, deps.Policy)
+	dec := policy.EvaluateForBrokerSubmit(intent, snap, pol)
 	if dec.EffectiveOutcome != policy.OutcomeAllow {
 		return Result{Outcome: OutcomePolicyDenied, ProposalID: propID, PolicyDecision: dec}
 	}
@@ -215,6 +224,11 @@ func FromProposal(ctx context.Context, deps Deps, prop proposals.Proposal, opts 
 		LimitPrice:    prop.LimitPrice,
 		ClientOrderID: coid,
 	}
+	if stopPx, targetPx, ok := bracketLevelsFromRationale(prop.RationaleSnapshot); ok {
+		placeIn.OrderClass = "bracket"
+		placeIn.StopLossStopPrice = stopPx
+		placeIn.TakeProfitLimitPrice = targetPx
+	}
 
 	orderSnap, err := restCli.PlaceOrder(ctx, placeIn)
 	if err != nil {
@@ -249,6 +263,38 @@ func FromProposal(ctx context.Context, deps Deps, prop proposals.Proposal, opts 
 		BrokerOrderID: brokerID,
 		ProposalID:    propID,
 	}
+}
+
+var (
+	stopPricePattern   = regexp.MustCompile(`(?i)\b(?:stop|stop-loss|stop loss)\s*(?:at|:|=)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)`)
+	targetPricePattern = regexp.MustCompile(`(?i)\b(?:target|take-profit|take profit)\s*(?:at|:|=)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)`)
+)
+
+func bracketLevelsFromRationale(rationale *string) (stopPx *decimal.Decimal, targetPx *decimal.Decimal, ok bool) {
+	if rationale == nil {
+		return nil, nil, false
+	}
+	text := strings.TrimSpace(*rationale)
+	if text == "" {
+		return nil, nil, false
+	}
+	stopMatch := stopPricePattern.FindStringSubmatch(text)
+	targetMatch := targetPricePattern.FindStringSubmatch(text)
+	if len(stopMatch) < 2 || len(targetMatch) < 2 {
+		return nil, nil, false
+	}
+	stop, err := decimal.NewFromString(strings.TrimSpace(stopMatch[1]))
+	if err != nil || stop.LessThanOrEqual(decimal.Zero) {
+		return nil, nil, false
+	}
+	target, err := decimal.NewFromString(strings.TrimSpace(targetMatch[1]))
+	if err != nil || target.LessThanOrEqual(decimal.Zero) {
+		return nil, nil, false
+	}
+	if stop.Equal(target) {
+		return nil, nil, false
+	}
+	return &stop, &target, true
 }
 
 func restClientFromKeys(keys events.PortfolioAlpacaKeyMaterial, newREST RESTFactory) (alpaca.REST, error) {

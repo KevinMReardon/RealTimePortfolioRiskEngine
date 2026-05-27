@@ -18,11 +18,14 @@ import (
 
 const (
 	// screenerPath is the Alpaca Market Data REST path for most-active equities.
-	screenerPath = "/v2/screener/stocks/most-actives"
+	// See https://docs.alpaca.markets/reference/mostactives-1
+	screenerPath = "/v1beta1/screener/stocks/most-actives"
 
-	// defaultTop is the maximum number of symbols to request. Alpaca's free tier
-	// supports up to 200; 150 gives a rich universe without hitting plan caps.
-	defaultTop = 150
+	// defaultTop is the number of symbols requested when Top is unset.
+	defaultTop = 100
+
+	// maxTop is Alpaca's per-request cap for the screener "top" query param.
+	maxTop = 100
 
 	defaultHTTPTimeout = 15 * time.Second
 )
@@ -41,6 +44,13 @@ type WatchlistRuntime interface {
 	SetWatchlist(symbols []string)
 }
 
+// WatchlistTickTrigger is implemented by the price feed ingestor to poll immediately
+// after the watchlist changes.
+type WatchlistTickTrigger interface {
+	WatchlistRuntime
+	TriggerTick(ctx context.Context)
+}
+
 // HydratorConfig configures the universe hydrator.
 type HydratorConfig struct {
 	// DataBaseURL is the Alpaca Market Data REST origin (e.g. https://data.alpaca.markets).
@@ -48,7 +58,7 @@ type HydratorConfig struct {
 	// KeyID and SecretKey are the Alpaca API credentials.
 	KeyID     string
 	SecretKey string
-	// Top is the number of most-active symbols to fetch (default 150, max 200).
+	// Top is the number of most-active symbols to fetch (default 100, max 100 per Alpaca API).
 	Top int
 	// HTTPTimeout caps each screener HTTP request (default 15s).
 	HTTPTimeout time.Duration
@@ -67,11 +77,7 @@ type Hydrator struct {
 
 // NewHydrator constructs a Hydrator. runtime may be nil when no live feed is running.
 func NewHydrator(cfg HydratorConfig, persistence WatchlistPersistence, runtime WatchlistRuntime) *Hydrator {
-	top := cfg.Top
-	if top <= 0 {
-		top = defaultTop
-	}
-	cfg.Top = top
+	cfg.Top = clampTop(cfg.Top)
 	timeout := cfg.HTTPTimeout
 	if timeout <= 0 {
 		timeout = defaultHTTPTimeout
@@ -107,6 +113,9 @@ func (h *Hydrator) Run(ctx context.Context) error {
 	}
 	if h.runtime != nil {
 		h.runtime.SetWatchlist(symbols)
+		if tr, ok := h.runtime.(WatchlistTickTrigger); ok {
+			tr.TriggerTick(ctx)
+		}
 	}
 	h.log.Info("universe_hydrator_ok", zap.Int("symbols", len(symbols)))
 	return nil
@@ -166,12 +175,19 @@ func (h *Hydrator) fetchMostActives(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// RunLoop runs a single fetch immediately, then repeats every interval until ctx is done.
-// Log errors but do not exit the loop on transient failures.
-func (h *Hydrator) RunLoop(ctx context.Context, interval time.Duration) {
-	if err := h.Run(ctx); err != nil {
-		h.log.Warn("universe_hydrator_initial_run_failed", zap.Error(err))
+func clampTop(top int) int {
+	if top <= 0 {
+		return defaultTop
 	}
+	if top > maxTop {
+		return maxTop
+	}
+	return top
+}
+
+// RunLoop repeats Run on interval until ctx is done. Call Run once at startup before
+// the price feed starts; this loop is for periodic refresh only.
+func (h *Hydrator) RunLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

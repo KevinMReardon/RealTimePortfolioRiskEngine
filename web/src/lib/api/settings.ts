@@ -1,6 +1,6 @@
 import { apiFetch } from "@/lib/api/client";
 
-export type SettingType = "bool" | "int" | "string" | "select";
+export type SettingType = "bool" | "int" | "number" | "string" | "select";
 
 export interface SettingDef {
   key: string;
@@ -23,7 +23,8 @@ export interface SettingsPatchResponse {
 }
 
 export async function fetchSettings(): Promise<SettingsListResponse> {
-  return apiFetch<SettingsListResponse>("/v1/settings");
+  // Cache-bust aggressively so manual Refresh always pulls current backend state.
+  return apiFetch<SettingsListResponse>(`/v1/settings?_ts=${Date.now()}`);
 }
 
 export async function patchSettings(

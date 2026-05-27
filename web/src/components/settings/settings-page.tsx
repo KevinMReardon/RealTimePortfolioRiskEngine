@@ -117,6 +117,19 @@ function SettingRow({
             }}
           />
         )}
+        {setting.type === "number" && (
+          <Input
+            id={setting.key}
+            type="number"
+            step="any"
+            value={String(current)}
+            className="w-28 text-right"
+            onChange={(e) => {
+              const n = parseFloat(e.target.value);
+              if (!isNaN(n)) onChange(setting.key, n);
+            }}
+          />
+        )}
         {setting.type === "string" && (
           <Input
             id={setting.key}
@@ -181,6 +194,7 @@ function SettingGroup({
 export function SettingsPage() {
   const [settings, setSettings] = useState<SettingDef[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [local, setLocal] = useState<LocalValues>({});
   const [saving, setSaving] = useState(false);
   const [savedKeys, setSavedKeys] = useState<string[]>([]);
@@ -189,11 +203,14 @@ export function SettingsPage() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
+      setRefreshing(true);
       const res = await fetchSettings();
       setSettings(res.settings);
       setLocal({});
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to load settings");
+    } finally {
+      setRefreshing(false);
     }
   }, []);
 
@@ -270,9 +287,12 @@ export function SettingsPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Secrets (API keys, database credentials) remain in{" "}
+            Secrets (API keys, database credentials) stay in{" "}
             <code className="text-xs bg-muted px-1 py-0.5 rounded">.env</code>.
-            All other settings are stored here and loaded at startup.
+            All other settings are stored in the database, override{" "}
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">.env</code>{" "}
+            on startup, and take effect immediately unless marked{" "}
+            <span className="font-medium">restart required</span>.
           </p>
         </div>
         <Button
@@ -280,9 +300,10 @@ export function SettingsPage() {
           variant="outline"
           size="sm"
           className="gap-1.5"
+          disabled={refreshing}
         >
-          <RefreshCw className="h-3.5 w-3.5" />
-          Refresh
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          {refreshing ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
 

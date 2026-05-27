@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 )
 
@@ -78,6 +79,7 @@ func postBriefingHandler(
 	priceStreamPartitions []uuid.UUID,
 	defaultMaxTokens int,
 	defaultTemperature float64,
+	cfgHolder *config.ConfigHolder,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		pid, ok := ensurePortfolioAccess(c, readStore, priceStreamPartitions)
@@ -107,6 +109,18 @@ func postBriefingHandler(
 		if user, hasUser := authUserFromContext(c); hasUser {
 			requestedBy = &user.UserID
 		}
+		// Read live defaults from config holder if available (supports settings hot-reload).
+		effectiveMaxTokens := defaultMaxTokens
+		effectiveTemperature := defaultTemperature
+		if cfgHolder != nil {
+			liveCfg := cfgHolder.Get()
+			if liveCfg.AgentMaxTokens > 0 {
+				effectiveMaxTokens = liveCfg.AgentMaxTokens
+			}
+			if liveCfg.AgentTemperature >= 0 {
+				effectiveTemperature = liveCfg.AgentTemperature
+			}
+		}
 		req := agent.RunBriefingRequest{
 			PortfolioID:       pid,
 			RequestedByUserID: requestedBy,
@@ -116,12 +130,12 @@ func postBriefingHandler(
 			MaxTokens:         reqBody.MaxTokens,
 			UserInput:         userInputRaw,
 		}
-		if req.MaxTokens == nil && defaultMaxTokens > 0 {
-			v := defaultMaxTokens
+		if req.MaxTokens == nil && effectiveMaxTokens > 0 {
+			v := effectiveMaxTokens
 			req.MaxTokens = &v
 		}
-		if req.Temperature == nil && defaultTemperature >= 0 {
-			v := defaultTemperature
+		if req.Temperature == nil && effectiveTemperature >= 0 {
+			v := effectiveTemperature
 			req.Temperature = &v
 		}
 		var result agent.RunBriefingResult

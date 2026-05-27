@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -27,6 +28,13 @@ func (s *paperAutoStore) SaveCriticVerdict(ctx context.Context, p proposals.Save
 
 func (s *paperAutoStore) ApproveProposalAuto(ctx context.Context, p proposals.AutoApproveParams) error {
 	return nil
+}
+
+func (s *paperAutoStore) ListByPortfolio(ctx context.Context, portfolioID uuid.UUID, filter proposals.ListFilter) ([]proposals.Proposal, error) {
+	if filter.Status == nil || *filter.Status == s.prop.Status {
+		return []proposals.Proposal{s.prop}, nil
+	}
+	return nil, nil
 }
 
 type stubPaperKeys struct {
@@ -59,4 +67,29 @@ func TestPaperAutoRunner_SkipsLiveAccount(t *testing.T) {
 	if store.prop.Status != "proposed" {
 		t.Fatalf("status=%q want proposed", store.prop.Status)
 	}
+}
+
+type retryCatalogStub struct {
+	rows []events.AgentBriefingEligiblePortfolio
+}
+
+func (r retryCatalogStub) ListAgentBriefingEligiblePortfolios(ctx context.Context) ([]events.AgentBriefingEligiblePortfolio, error) {
+	return r.rows, nil
+}
+
+func TestPaperAutoRetryRunner_DisabledNoop(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	r := &PaperAutoRetryRunner{
+		Config: PaperAutoRetryConfig{Enabled: false},
+		Auto: &PaperAutoRunner{
+			Config: PaperAutoConfig{Enabled: true},
+			Store:  &paperAutoStore{prop: proposals.Proposal{PortfolioID: pid}},
+		},
+		Catalog: retryCatalogStub{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: pid}}},
+		Log:     zap.NewNop(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	r.Run(ctx)
 }

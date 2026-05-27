@@ -13,10 +13,17 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 )
+
+func testRuntimeConfigHolder() *config.ConfigHolder {
+	return config.NewConfigHolder(config.Config{
+		PolicyMode: policy.ModeEnforce,
+	})
+}
 
 type fakeAlpacaKeyLoader struct {
 	linked bool
@@ -60,8 +67,7 @@ func TestProposalSubmit_Unauthorized(t *testing.T) {
 		AuthConfig:            AuthConfig{CookieSecure: false, SessionTTL: time.Hour},
 		ProposalsStore:        propStore,
 		ProposalAlpacaKeys:    &fakeAlpacaKeyLoader{linked: false},
-		ProposalPolicy:        policy.Config{Mode: policy.ModeEnforce},
-		ProposalTradingHalt:   false,
+		RuntimeConfig: testRuntimeConfigHolder(),
 	})
 	propID := uuid.New()
 	body := []byte(`{"payload_hash":"abc","row_version":1}`)
@@ -101,8 +107,7 @@ func TestProposalSubmit_InvalidJSON(t *testing.T) {
 		AuthConfig:            AuthConfig{CookieSecure: false, SessionTTL: time.Hour},
 		ProposalsStore:        propStore,
 		ProposalAlpacaKeys:    &fakeAlpacaKeyLoader{linked: false},
-		ProposalPolicy:        policy.Config{Mode: policy.ModeEnforce},
-		ProposalTradingHalt:   false,
+		RuntimeConfig: testRuntimeConfigHolder(),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/portfolios/"+portfolioID.String()+"/proposals/"+propID.String()+"/submit", bytes.NewReader([]byte(`not-json`)))
 	req.Header.Set("Content-Type", "application/json")

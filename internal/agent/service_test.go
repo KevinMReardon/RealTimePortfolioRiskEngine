@@ -425,7 +425,8 @@ func TestCreateBriefingScheduled_SkipsWhenSessionRunning(t *testing.T) {
 				TriggerSource: "scheduled",
 				RunDate:       runDate,
 				// Only an active session (queued/running) should suppress new scheduled ticks.
-				Status: "running",
+				Status:    "running",
+				CreatedAt: time.Now().UTC().Add(-30 * time.Second),
 			},
 		},
 	}

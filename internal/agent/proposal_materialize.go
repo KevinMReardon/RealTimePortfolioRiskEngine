@@ -14,7 +14,9 @@ import (
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/domain"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/portfolio"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 )
@@ -31,13 +33,33 @@ type ProposalStore interface {
 	KillSwitchLatestActive(ctx context.Context) (active bool, ok bool, err error)
 }
 
+// MaterializeAlpacaKeyLoader loads per-portfolio Alpaca credentials so the materializer can query
+// the broker for live equity and account flags (optional; nil is tolerated).
+type MaterializeAlpacaKeyLoader interface {
+	LoadPortfolioAlpacaKeyMaterial(ctx context.Context, portfolioID uuid.UUID) (events.PortfolioAlpacaKeyMaterial, bool, error)
+}
+
+// MaterializeDailyUsageLoader reads today's submitted notional + recent order count for snapshot
+// daily-budget and rate-limit rules (optional; nil is tolerated).
+type MaterializeDailyUsageLoader interface {
+	LoadDailyUsage(ctx context.Context, portfolioID uuid.UUID, nowNY time.Time) (decimal.Decimal, int, error)
+}
+
+// MaterializeRESTFactory builds an alpaca.REST from key material (same signature as submit.RESTFactory).
+type MaterializeRESTFactory func(cfg alpaca.RESTConfig) (alpaca.REST, error)
+
 // BriefingProposalMaterializer turns validated briefing trade ideas into proposed_trades rows.
 type BriefingProposalMaterializer struct {
-	Store         ProposalStore
-	Loader        PortfolioAssemblerLoader
-	Policy        policy.Config
-	TradingHalt   bool
-	Log           *zap.Logger
+	Store       ProposalStore
+	Loader      PortfolioAssemblerLoader
+	Keys        MaterializeAlpacaKeyLoader
+	Usage       MaterializeDailyUsageLoader
+	NewREST     MaterializeRESTFactory
+	Policy      policy.Config
+	TradingHalt bool
+	// Runtime when set supplies Policy and TradingHalt on each Materialize call.
+	Runtime *config.ConfigHolder
+	Log     *zap.Logger
 }
 
 var _ ProposalMaterializer = (*BriefingProposalMaterializer)(nil)
@@ -70,12 +92,64 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 	} else if ok {
 		equityAnchor = eq
 	}
+	pol := m.Policy
+	tradingHalt := m.TradingHalt
+	if m.Runtime != nil {
+		c := m.Runtime.Get()
+		pol = c.PolicyConfig()
+		tradingHalt = c.TradingHalt
+	}
+
 	dbKillActive, dbKillPresent, err := m.Store.KillSwitchLatestActive(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("proposal materialize: kill switch: %w", err)
 	}
-	killEnv, killDB := proposals.KillSwitchInputs(m.TradingHalt, dbKillActive, dbKillPresent)
+	killEnv, killDB := proposals.KillSwitchInputs(tradingHalt, dbKillActive, dbKillPresent)
 	snap := policy.BuildSnapshot(in, equityAnchor, nowNY, killEnv, killDB)
+
+	// Overlay live broker account (cash-aware equity + PDT/blocks) so proposal-time policy matches submit-time.
+	if m.Keys != nil && m.NewREST != nil {
+		if keys, linked, err := m.Keys.LoadPortfolioAlpacaKeyMaterial(ctx, portfolioID); err != nil {
+			m.Log.Warn("proposal_materialize_alpaca_keys_failed", zap.Error(err), zap.String("portfolio_id", portfolioID.String()))
+		} else if linked {
+			baseURL := strings.TrimSpace(keys.BaseURL)
+			if baseURL == "" {
+				if strings.EqualFold(keys.AccountMode, "live") {
+					baseURL = alpaca.DefaultRESTBaseURLLive
+				} else {
+					baseURL = alpaca.DefaultRESTBaseURLPaper
+				}
+			}
+			if rest, err := m.NewREST(alpaca.RESTConfig{KeyID: keys.KeyID, SecretKey: keys.SecretKey, BaseURL: baseURL}); err != nil {
+				m.Log.Warn("proposal_materialize_alpaca_client_failed", zap.Error(err), zap.String("portfolio_id", portfolioID.String()))
+			} else if acct, err := rest.GetAccount(ctx); err != nil {
+				m.Log.Warn("proposal_materialize_alpaca_account_failed", zap.Error(err), zap.String("portfolio_id", portfolioID.String()))
+			} else {
+				policy.ApplyBrokerAccount(&snap, policy.BrokerAccountSnapshot{
+					PatternDayTrader: acct.PatternDayTrader,
+					TradingBlocked:   acct.TradingBlocked,
+					AccountBlocked:   acct.AccountBlocked,
+					Equity:           acct.Equity,
+				})
+				m.Log.Info("proposal_materialize_broker_snapshot",
+					zap.String("portfolio_id", portfolioID.String()),
+					zap.String("broker_equity", acct.Equity.String()),
+					zap.Bool("trading_blocked", acct.TradingBlocked),
+					zap.Bool("account_blocked", acct.AccountBlocked),
+					zap.Bool("pdt", acct.PatternDayTrader),
+				)
+			}
+		}
+	}
+
+	// Overlay today's submitted notional + recent order count so daily-budget and rate-limit rules are real.
+	if m.Usage != nil {
+		if dailyNotional, ordersLastMin, err := m.Usage.LoadDailyUsage(ctx, portfolioID, nowNY); err != nil {
+			m.Log.Warn("proposal_materialize_daily_usage_failed", zap.Error(err), zap.String("portfolio_id", portfolioID.String()))
+		} else {
+			policy.ApplyDailyUsage(&snap, dailyNotional, ordersLastMin)
+		}
+	}
 
 	var inserted []uuid.UUID
 	for i := range out.TradeIdeas {
@@ -88,7 +162,7 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 			m.Log.Warn("proposal_materialize_skip_idea", zap.Int("trade_idea_index", i), zap.Error(err))
 			continue
 		}
-		decision := policy.Evaluate(intent, snap, m.Policy)
+		decision := policy.Evaluate(intent, snap, pol)
 		idx := i
 		rat := strings.TrimSpace(idea.Rationale)
 		var ratPtr *string
@@ -103,7 +177,7 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 			RationaleSnapshot: ratPtr,
 			Intent:            intent,
 			Decision:          decision,
-			Mode:              m.Policy.Mode,
+			Mode:              pol.Mode,
 		})
 		if err == nil {
 			inserted = append(inserted, prop.ProposalID)

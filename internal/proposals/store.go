@@ -425,6 +425,66 @@ func (s *Store) MarkProposalBrokerError(ctx context.Context, portfolioID, propos
 	return nil
 }
 
+// MarkProposalFilled transitions submitted -> filled once broker confirms fill.
+func (s *Store) MarkProposalFilled(ctx context.Context, portfolioID, proposalID uuid.UUID, brokerOrderID string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	brokerOrderID = strings.TrimSpace(brokerOrderID)
+	if brokerOrderID == "" {
+		return fmt.Errorf("proposals: broker_order_id required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			status = 'filled',
+			last_error = NULL,
+			row_version = row_version + 1,
+			updated_at = NOW()
+		WHERE proposal_id = $1 AND portfolio_id = $2
+		  AND status IN ('submitted','filled')
+		  AND broker_order_id = $3
+	`, proposalID, portfolioID, brokerOrderID)
+	if err != nil {
+		return fmt.Errorf("proposals: mark filled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSubmitConflict
+	}
+	return nil
+}
+
+// MarkProposalCancelled transitions submitted -> cancelled when broker order is terminal-cancelled.
+func (s *Store) MarkProposalCancelled(ctx context.Context, portfolioID, proposalID uuid.UUID, brokerOrderID, reason string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("proposals: nil store")
+	}
+	brokerOrderID = strings.TrimSpace(brokerOrderID)
+	if brokerOrderID == "" {
+		return fmt.Errorf("proposals: broker_order_id required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "broker_cancelled"
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE proposed_trades SET
+			status = 'cancelled',
+			last_error = $4,
+			row_version = row_version + 1,
+			updated_at = NOW()
+		WHERE proposal_id = $1 AND portfolio_id = $2
+		  AND status IN ('submitted','approved')
+		  AND broker_order_id = $3
+	`, proposalID, portfolioID, brokerOrderID, reason)
+	if err != nil {
+		return fmt.Errorf("proposals: mark cancelled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSubmitConflict
+	}
+	return nil
+}
+
 // LoadEquityAnchorForPortfolioDate returns stored anchor equity for portfolio on anchorDate (calendar date).
 // ok is false when no row exists (caller may use zero equity in policy snapshot).
 func (s *Store) LoadEquityAnchorForPortfolioDate(ctx context.Context, portfolioID uuid.UUID, anchorDate time.Time) (equity decimal.Decimal, ok bool, err error) {
@@ -451,6 +511,81 @@ func (s *Store) LoadEquityAnchorForPortfolioDate(ctx context.Context, portfolioI
 		return decimal.Zero, false, fmt.Errorf("proposals: parse equity anchor: %w", err)
 	}
 	return dec, true, nil
+}
+
+// SumNotionalSubmittedToday returns the sum of |notional_usd| for proposals already submitted or
+// filled today (NY calendar). dayStartUTC / dayEndUTC must bracket the NY day in UTC. Returns
+// zero when no rows match. Rows with NULL notional_usd are skipped (typically quantity-sized orders).
+func (s *Store) SumNotionalSubmittedToday(ctx context.Context, portfolioID uuid.UUID, dayStartUTC, dayEndUTC time.Time) (decimal.Decimal, error) {
+	if s == nil || s.pool == nil {
+		return decimal.Zero, fmt.Errorf("proposals: nil store")
+	}
+	var raw sql.NullString
+	q := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(ABS(notional_usd)), 0)::text
+		FROM proposed_trades
+		WHERE portfolio_id = $1
+		  AND submitted_at >= $2
+		  AND submitted_at < $3
+		  AND status IN ('submitted','filled')
+		  AND notional_usd IS NOT NULL
+	`, portfolioID, dayStartUTC, dayEndUTC)
+	if err := q.Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return decimal.Zero, nil
+		}
+		return decimal.Zero, fmt.Errorf("proposals: sum daily notional: %w", err)
+	}
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return decimal.Zero, nil
+	}
+	dec, err := decimal.NewFromString(strings.TrimSpace(raw.String))
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("proposals: parse daily notional: %w", err)
+	}
+	return dec, nil
+}
+
+// CountOrdersSince returns the number of proposals submitted to the broker for portfolioID with
+// submitted_at >= since. Used to populate the rate-limit window for policy evaluation.
+func (s *Store) CountOrdersSince(ctx context.Context, portfolioID uuid.UUID, since time.Time) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("proposals: nil store")
+	}
+	var n int
+	q := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM proposed_trades
+		WHERE portfolio_id = $1
+		  AND submitted_at IS NOT NULL
+		  AND submitted_at >= $2
+		  AND status IN ('submitted','filled')
+	`, portfolioID, since)
+	if err := q.Scan(&n); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("proposals: count orders since: %w", err)
+	}
+	return n, nil
+}
+
+// LoadDailyUsage returns today's submitted notional (NY calendar) and the count of orders submitted
+// in the trailing 60 seconds, both for portfolioID. nowNY is the evaluation moment in NY time and is
+// also used to compute the NY-day boundaries in UTC for the SQL window.
+func (s *Store) LoadDailyUsage(ctx context.Context, portfolioID uuid.UUID, nowNY time.Time) (decimal.Decimal, int, error) {
+	loc := nowNY.Location()
+	dayStartNY := time.Date(nowNY.Year(), nowNY.Month(), nowNY.Day(), 0, 0, 0, 0, loc)
+	dayEndNY := dayStartNY.Add(24 * time.Hour)
+	notional, err := s.SumNotionalSubmittedToday(ctx, portfolioID, dayStartNY.UTC(), dayEndNY.UTC())
+	if err != nil {
+		return decimal.Zero, 0, err
+	}
+	count, err := s.CountOrdersSince(ctx, portfolioID, nowNY.Add(-60*time.Second).UTC())
+	if err != nil {
+		return decimal.Zero, 0, err
+	}
+	return notional, count, nil
 }
 
 // UpsertEquityAnchor sets equity for portfolio on anchorDate (calendar date; use date parts in UTC or NY-local date).

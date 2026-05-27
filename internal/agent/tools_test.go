@@ -28,6 +28,8 @@ type fakeToolDataSource struct {
 	priceDetail *events.PriceSymbolDetail
 	priceFound  bool
 	priceErr    error
+
+	priceMarks events.ListPriceMarksResult
 }
 
 func (f *fakeToolDataSource) LoadPortfolioAssemblerInput(context.Context, uuid.UUID) (portfolio.PortfolioAssemblerInput, bool, error) {
@@ -43,6 +45,10 @@ func (f *fakeToolDataSource) LoadSymbolSigma1D(context.Context, []string, int) (
 func (f *fakeToolDataSource) GetPriceSymbolDetail(context.Context, string, int) (*events.PriceSymbolDetail, bool, error) {
 	f.priceDetailCalls++
 	return f.priceDetail, f.priceFound, f.priceErr
+}
+
+func (f *fakeToolDataSource) ListPriceMarks(context.Context, events.ListPriceMarksParams) (events.ListPriceMarksResult, error) {
+	return f.priceMarks, nil
 }
 
 type fakeBuyingPower struct {
@@ -292,6 +298,69 @@ func TestTools_RequestScopedMemoization(t *testing.T) {
 	}
 	if ds.loadAssemblerCalls != 1 {
 		t.Fatalf("expected memoized single datasource call, got %d", ds.loadAssemblerCalls)
+	}
+}
+
+func TestTools_ClearSessionCache(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	ds := &fakeToolDataSource{
+		assemblerFound: true,
+		assemblerInput: portfolio.PortfolioAssemblerInput{
+			PortfolioID: pid,
+			Positions:   []portfolio.ProjectionRow{},
+		},
+	}
+	d := NewToolDispatcher(ds, nil, nil, nil)
+	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
+	callS1 := ToolCallRequest{SessionID: "s1", ToolName: ToolGetPositions, Input: in}
+	callS2 := ToolCallRequest{SessionID: "s2", ToolName: ToolGetPositions, Input: in}
+	_, _ = d.Execute(context.Background(), callS1)
+	_, _ = d.Execute(context.Background(), callS2)
+	if ds.loadAssemblerCalls != 2 {
+		t.Fatalf("precondition load calls=%d want 2", ds.loadAssemblerCalls)
+	}
+	_, _ = d.Execute(context.Background(), callS1)
+	if ds.loadAssemblerCalls != 2 {
+		t.Fatalf("expected s1 memoization before clear, got %d", ds.loadAssemblerCalls)
+	}
+	d.ClearSessionCache("s1")
+	_, _ = d.Execute(context.Background(), callS1)
+	if ds.loadAssemblerCalls != 3 {
+		t.Fatalf("expected s1 cache clear to force reload, got %d", ds.loadAssemblerCalls)
+	}
+	_, _ = d.Execute(context.Background(), callS2)
+	if ds.loadAssemblerCalls != 3 {
+		t.Fatalf("expected s2 cache untouched, got %d", ds.loadAssemblerCalls)
+	}
+}
+
+func TestTools_ExpiredCacheEvicted(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	ds := &fakeToolDataSource{
+		assemblerFound: true,
+		assemblerInput: portfolio.PortfolioAssemblerInput{
+			PortfolioID: pid,
+			Positions:   []portfolio.ProjectionRow{},
+		},
+	}
+	d := NewToolDispatcher(ds, nil, nil, nil)
+	in := json.RawMessage(`{"portfolio_id":"` + pid.String() + `"}`)
+	call := ToolCallRequest{SessionID: "s1", ToolName: ToolGetPositions, Input: in}
+	_, _ = d.Execute(context.Background(), call)
+	if ds.loadAssemblerCalls != 1 {
+		t.Fatalf("precondition load calls=%d want 1", ds.loadAssemblerCalls)
+	}
+	key := d.memoKey(call)
+	d.mu.Lock()
+	entry := d.cache[key]
+	entry.expiresAt = time.Now().UTC().Add(-time.Minute)
+	d.cache[key] = entry
+	d.mu.Unlock()
+	_, _ = d.Execute(context.Background(), call)
+	if ds.loadAssemblerCalls != 2 {
+		t.Fatalf("expected expired cache eviction, got calls=%d", ds.loadAssemblerCalls)
 	}
 }
 

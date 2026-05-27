@@ -233,6 +233,26 @@ func (r *PriceIngestor) SetWatchlist(symbols []string) {
 	r.symbolsMu.Unlock()
 }
 
+// TriggerTick runs one poll cycle asynchronously (e.g. after the watchlist grows).
+func (r *PriceIngestor) TriggerTick(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	go func() {
+		tickCtx := ctx
+		var cancel context.CancelFunc
+		if tickCtx == nil {
+			tickCtx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+		}
+		if err := r.runTick(tickCtx); err != nil && !errors.Is(err, context.Canceled) {
+			if r.log != nil {
+				r.log.Warn("price_feed_trigger_tick_failed", zap.Error(err))
+			}
+		}
+	}()
+}
+
 func (r *PriceIngestor) currentSymbols() []string {
 	r.symbolsMu.RLock()
 	defer r.symbolsMu.RUnlock()

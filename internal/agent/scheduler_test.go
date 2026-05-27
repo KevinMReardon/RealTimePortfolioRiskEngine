@@ -89,7 +89,8 @@ func TestRunScheduledBriefingTick_DuplicateSuppressedWhenSessionRunning(t *testi
 				TriggerSource: "scheduled",
 				RunDate:       now,
 				// A running session should suppress the next tick to avoid concurrent duplicates.
-				Status: "running",
+				Status:    "running",
+				CreatedAt: now.Add(-30 * time.Second),
 			},
 		},
 	}
@@ -133,6 +134,74 @@ func TestRunScheduledBriefingTick_AllowsNewRunAfterPreviousSucceeded(t *testing.
 	// A completed session should NOT suppress the next hourly tick.
 	if store.createCalls != 1 {
 		t.Fatalf("expected new session after previous succeeded, createCalls=%d", store.createCalls)
+	}
+}
+
+func TestRunScheduledBriefingTick_AllowsNewRunWhenInflightIsStale(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	owner := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		list: []events.AgentSession{
+			{
+				SessionID:     uuid.New(),
+				PortfolioID:   pid,
+				TriggerSource: "scheduled",
+				RunDate:       now.Add(-2 * time.Hour),
+				Status:        "running",
+				CreatedAt:     now.Add(-90 * time.Minute),
+			},
+		},
+	}
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{"market_summary":"m","portfolio_context":"p","trade_ideas":[],"risks_and_caveats":"r","data_gaps":[],"disclaimer":"d","used_sources":[],"used_fields":[]}`,
+				Raw:        []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	svc := NewService(store, client, &mockToolExecutor{}, "anthropic", "claude-test")
+	cat := stubEligibilityLister{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: pid, OwnerUserID: owner}}}
+	RunScheduledBriefingTick(context.Background(), zap.NewNop(), svc, cat)
+	if store.createCalls != 1 {
+		t.Fatalf("stale in-flight session must not block tick, createCalls=%d", store.createCalls)
+	}
+}
+
+func TestRunScheduledBriefingTick_ManualInflightDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	owner := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		list: []events.AgentSession{
+			{
+				SessionID:     uuid.New(),
+				PortfolioID:   pid,
+				TriggerSource: "manual",
+				RunDate:       now,
+				Status:        "running",
+				CreatedAt:     now.Add(-1 * time.Minute),
+			},
+		},
+	}
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{"market_summary":"m","portfolio_context":"p","trade_ideas":[],"risks_and_caveats":"r","data_gaps":[],"disclaimer":"d","used_sources":[],"used_fields":[]}`,
+				Raw:        []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	svc := NewService(store, client, &mockToolExecutor{}, "anthropic", "claude-test")
+	cat := stubEligibilityLister{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: pid, OwnerUserID: owner}}}
+	RunScheduledBriefingTick(context.Background(), zap.NewNop(), svc, cat)
+	if store.createCalls != 1 {
+		t.Fatalf("in-flight manual session must not block scheduled tick, createCalls=%d", store.createCalls)
 	}
 }
 

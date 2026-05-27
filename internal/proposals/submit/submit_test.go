@@ -370,6 +370,31 @@ func TestFromProposal_table(t *testing.T) {
 			},
 		},
 		{
+			name: "success_with_bracket_from_rationale",
+			prop: func() proposals.Proposal {
+				p := baseProp
+				r := "Plan: buy breakout; stop at 120.50 and target at 165.25."
+				p.RationaleSnapshot = &r
+				return p
+			}(),
+			deps: func(fs *fakeStore, fr *fakeRead, rest *fakeREST) Deps {
+				rest.order = alpaca.OrderSnapshot{ID: "ord-bracket"}
+				return baseDeps(rest, fs, fr)
+			},
+			want: OutcomeSuccess,
+			check: func(t *testing.T, fs *fakeStore, rest *fakeREST) {
+				if fs.submitCalls != 1 {
+					t.Fatalf("submitCalls=%d want 1", fs.submitCalls)
+				}
+				if rest.lastPlace.OrderClass != "bracket" {
+					t.Fatalf("order_class=%q want bracket", rest.lastPlace.OrderClass)
+				}
+				if rest.lastPlace.StopLossStopPrice == nil || rest.lastPlace.TakeProfitLimitPrice == nil {
+					t.Fatalf("expected bracket legs to be populated")
+				}
+			},
+		},
+		{
 			name: "conflict_after_broker",
 			prop: baseProp,
 			deps: func(fs *fakeStore, fr *fakeRead, rest *fakeREST) Deps {

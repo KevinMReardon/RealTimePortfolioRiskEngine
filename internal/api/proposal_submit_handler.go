@@ -11,8 +11,8 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 )
 
@@ -33,8 +33,7 @@ func postProposalSubmitHandler(
 	readStore PortfolioReadStore,
 	priceStreamPartitions []uuid.UUID,
 	alpacaKeys ProposalAlpacaKeyLoader,
-	pol policy.Config,
-	tradingHaltEnv bool,
+	runtimeCfg *config.ConfigHolder,
 	log *zap.Logger,
 ) gin.HandlerFunc {
 	restFactory := func(cfg alpaca.RESTConfig) (alpaca.REST, error) {
@@ -94,12 +93,18 @@ func postProposalSubmitHandler(
 			return
 		}
 
+		if runtimeCfg == nil {
+			respondAPIError(c, http.StatusServiceUnavailable, ErrCodeInsufficientData, "runtime config not configured", nil)
+			return
+		}
+		cfg := runtimeCfg.Get()
 		deps := submit.Deps{
 			Store:          store,
 			Read:           readStore,
 			Keys:           alpacaKeys,
-			Policy:         pol,
-			TradingHaltEnv: tradingHaltEnv,
+			Policy:         cfg.PolicyConfig(),
+			TradingHaltEnv: cfg.TradingHalt,
+			RuntimeConfig:  runtimeCfg,
 			Log:            log,
 			NewREST:        restFactory,
 		}

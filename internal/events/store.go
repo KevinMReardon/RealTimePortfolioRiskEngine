@@ -175,6 +175,10 @@ type Writer interface {
 	AppendAgentSessionToolCall(ctx context.Context, call AgentSessionToolCall) (AgentSessionToolCall, error)
 	CompleteAgentSessionSuccess(ctx context.Context, session AgentSession) error
 	CompleteAgentSessionFailure(ctx context.Context, session AgentSession) error
+	// MarkStaleAgentSessionsFailed marks any session in 'queued' or 'running' state whose
+	// created_at is older than olderThan as 'failed'. It is intended to be called at boot
+	// to recover from crashes that left sessions in an in-flight state.
+	MarkStaleAgentSessionsFailed(ctx context.Context, olderThan time.Time, reason string) (int64, error)
 }
 
 // Reader contains read-only stream/projection queries.

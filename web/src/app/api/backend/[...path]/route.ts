@@ -25,12 +25,17 @@ async function proxy(req: Request, segments: string[]) {
     headers,
     body: hasBody ? await req.text() : undefined,
     redirect: "manual",
+    cache: "no-store",
   });
 
   const resHeaders = new Headers(upstream.headers);
   // Avoid leaking hop-by-hop headers across proxies.
   resHeaders.delete("connection");
   resHeaders.delete("transfer-encoding");
+  // Force dynamic responses end-to-end for settings/admin pages.
+  resHeaders.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
+  resHeaders.set("pragma", "no-cache");
+  resHeaders.set("expires", "0");
 
   return new NextResponse(upstream.body, {
     status: upstream.status,

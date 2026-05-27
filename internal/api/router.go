@@ -13,7 +13,9 @@ import (
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/runtime"
 )
 
 type healthResponse struct {
@@ -89,6 +91,10 @@ type RouterConfig struct {
 
 	// SettingsStore enables GET/PATCH /v1/settings when non-nil.
 	SettingsStore SettingsStore
+	// SettingsReloader reapplies DB settings after PATCH (requires SettingsStore + RuntimeConfig).
+	SettingsReloader *runtime.SettingsReloader
+	// RuntimeConfig supplies effective config for settings GET and proposal submit.
+	RuntimeConfig *config.ConfigHolder
 }
 
 // NewRouter builds the API router and wires baseline middleware/handlers.
@@ -192,7 +198,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			))
 		}
 		if cfg.AgentService != nil && cfg.AuthStore != nil {
-			read.POST("/portfolios/:id/briefings", postBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions, cfg.AgentMaxTokens, cfg.AgentTemperature))
+			read.POST("/portfolios/:id/briefings", postBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions, cfg.AgentMaxTokens, cfg.AgentTemperature, cfg.RuntimeConfig))
 			read.GET("/portfolios/:id/briefings/latest", getLatestBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/portfolios/:id/briefings", getBriefingsHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/agent-sessions/:session_id/replay", getBriefingReplayHandler(cfg.AgentService, cfg.ReadPortfolio))
@@ -206,19 +212,18 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 				cfg.ReadPortfolio,
 				cfg.PriceStreamPartitions,
 				cfg.ProposalAlpacaKeys,
-				cfg.ProposalPolicy,
-				cfg.ProposalTradingHalt,
+				cfg.RuntimeConfig,
 				logger,
 			))
 		}
 	}
-	if cfg.SettingsStore != nil {
+	if cfg.SettingsStore != nil && cfg.RuntimeConfig != nil {
 		settings := router.Group("/v1")
 		if cfg.AuthStore != nil {
 			settings.Use(requireAuth(cfg.AuthStore))
 		}
-		settings.GET("/settings", getSettingsHandler(cfg.SettingsStore))
-		settings.PATCH("/settings", patchSettingsHandler(cfg.SettingsStore))
+		settings.GET("/settings", getSettingsHandler(cfg.RuntimeConfig))
+		settings.PATCH("/settings", patchSettingsHandler(cfg.SettingsStore, cfg.SettingsReloader))
 	}
 
 	if cfg.AuthStore != nil {

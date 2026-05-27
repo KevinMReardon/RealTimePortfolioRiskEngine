@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/events"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 )
@@ -22,6 +25,7 @@ type PaperAutoProposalStore interface {
 	ProposalReader
 	CriticVerdictWriter
 	ApproveProposalAuto(ctx context.Context, p proposals.AutoApproveParams) error
+	ListByPortfolio(ctx context.Context, portfolioID uuid.UUID, filter proposals.ListFilter) ([]proposals.Proposal, error)
 }
 
 // PaperAutoConfig controls autonomous paper execution after briefing materialization.
@@ -84,13 +88,17 @@ func (r *PaperAutoRunner) RunAfterMaterialize(parent context.Context, portfolioI
 			log.Info("paper_auto_cap_reached", zap.Int("max", max), zap.String("portfolio_id", portfolioID.String()))
 			return
 		}
-		if r.processOne(ctx, log, portfolioID, propID) {
+		if r.processOneWithOptions(ctx, log, portfolioID, propID, false) {
 			submitted++
 		}
 	}
 }
 
 func (r *PaperAutoRunner) processOne(ctx context.Context, log *zap.Logger, portfolioID, propID uuid.UUID) bool {
+	return r.processOneWithOptions(ctx, log, portfolioID, propID, false)
+}
+
+func (r *PaperAutoRunner) processOneWithOptions(ctx context.Context, log *zap.Logger, portfolioID, propID uuid.UUID, allowRetryDenied bool) bool {
 	prop, err := r.Store.GetByIDForPortfolio(ctx, portfolioID, propID)
 	if err != nil {
 		log.Warn("paper_auto_load_proposal", zap.Error(err), zap.String("proposal_id", propID.String()))
@@ -99,7 +107,8 @@ func (r *PaperAutoRunner) processOne(ctx context.Context, log *zap.Logger, portf
 	if prop.Status != "proposed" {
 		return false
 	}
-	if !proposals.PolicyResultAllowsAutoSubmit(prop.PolicyResult) {
+	allowByInitialPolicy := proposals.PolicyResultAllowsAutoSubmit(prop.PolicyResult)
+	if !allowByInitialPolicy && !(allowRetryDenied && policyResultRetryable(prop.PolicyResult)) {
 		log.Info("paper_auto_skipped_proposal", zap.String("reason", "policy_not_allow"), zap.String("proposal_id", propID.String()))
 		return false
 	}
@@ -145,4 +154,20 @@ func (r *PaperAutoRunner) processOne(ctx context.Context, log *zap.Logger, portf
 		)
 		return false
 	}
+}
+
+func policyResultRetryable(raw json.RawMessage) bool {
+	if proposals.PolicyResultAllowsAutoSubmit(raw) {
+		return true
+	}
+	var rec proposals.PolicyResultRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return false
+	}
+	for _, v := range rec.Violations {
+		if strings.EqualFold(strings.TrimSpace(v.Code), policy.RuleMarketHours) {
+			return true
+		}
+	}
+	return false
 }

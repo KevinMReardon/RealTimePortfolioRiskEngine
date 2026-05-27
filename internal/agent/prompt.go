@@ -19,7 +19,19 @@ const briefingSystemPrompt = "" +
 	"For each trade_ideas[] entry you intend as an executable idea: set non-empty rationale, size, stop, and target strings; set confidence to a number in [0,1] (decimals allowed, e.g. 0.72).\n" +
 	"For narrative-only ideas (no concrete order): omit order_type, time_in_force, limit_price, quantity, and notional_usd entirely.\n" +
 	"When you include structured order fields, include them together: symbol, side (BUY or SELL), and either quantity (shares) or notional_usd (USD); include order_type and time_in_force when applicable; include limit_price for limit-style orders.\n" +
-	"If using notional_usd for a US equity order, use at least 1.00 USD (broker minimum)."
+	"If using notional_usd for a US equity order, use at least 1.00 USD (broker minimum).\n" +
+	"IMPORTANT — Opportunity scan:\n" +
+	"WATCHLIST_MARKET_CONTEXT in the user message lists every tracked symbol with latest price and whether it is held.\n" +
+	"You MUST propose trade_ideas across that full list — not only symbols already in the portfolio.\n" +
+	"Include BUY ideas for promising symbols with held=false when data supports entry.\n" +
+	"Include trim/exit ideas for held symbols when warranted.\n" +
+	"Use get_price_history only for deeper drill-down on specific symbols; do not skip the broad scan.\n" +
+	"Research tools (use these before high-conviction ideas):\n" +
+	"- get_market_regime: call ONCE per briefing to read the broad-market backdrop (default SPY) and bias your ideas accordingly.\n" +
+	"- get_technical_indicators(symbol): SMA20/50/200, RSI14, momentum, volatility, trend label. Prefer trades aligned with trend; treat RSI > 70 as overbought / RSI < 30 as oversold.\n" +
+	"- get_daily_bars(symbol, limit): raw OHLCV bars when you need to inspect specific price action.\n" +
+	"- get_market_news(symbols, limit): recent headlines that may explain a move or invalidate a thesis.\n" +
+	"- get_buying_power(portfolio_id): current cash you can deploy; never size a notional_usd order above this number."
 
 func BuildBriefingUserPrompt(portfolioContext json.RawMessage, userInput json.RawMessage) string {
 	return BuildBriefingUserPromptFromContext(portfolioContext, nil, nil, userInput)
@@ -43,8 +55,10 @@ func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolConte
 		input = "{}"
 	}
 	return fmt.Sprintf(
-		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nTOOL_CONTEXT:\n%s\n\nINSTRUCTIONS:\n"+
+		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nWATCHLIST_MARKET_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nINSTRUCTIONS:\n"+
 			"- Propose only; do not claim execution.\n"+
+			"- WATCHLIST_MARKET_CONTEXT lists the full tracked universe with prices; scan ALL symbols, not only held positions.\n"+
+			"- Include trade ideas for new symbols (held=false) when supported by data; include holds, trims, and exits for held symbols.\n"+
 			"- Use unknown when data is missing.\n"+
 			"- Include used_sources and used_fields for factual/numeric statements.\n"+
 			"- trade_ideas: always an array; each actionable idea needs rationale, size, stop, target, and confidence in [0,1].\n"+
@@ -53,8 +67,8 @@ func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolConte
 			"- If using notional_usd, use at least 1.00 USD (broker minimum).",
 		input,
 		portfolio,
-		risk,
 		tools,
+		risk,
 	)
 }
 

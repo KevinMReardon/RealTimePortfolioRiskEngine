@@ -194,6 +194,19 @@ func placeOrderInputToSDK(in PlaceOrderInput) (sdkalpaca.PlaceOrderRequest, erro
 	if coid == "" {
 		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: client_order_id required")
 	}
+	orderClassRaw := strings.TrimSpace(strings.ToLower(in.OrderClass))
+	if orderClassRaw == "" {
+		orderClassRaw = "simple"
+	}
+	var orderClass sdkalpaca.OrderClass
+	switch orderClassRaw {
+	case "simple":
+		orderClass = sdkalpaca.Simple
+	case "bracket":
+		orderClass = sdkalpaca.Bracket
+	default:
+		return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: unsupported order_class %q", in.OrderClass)
+	}
 	req := sdkalpaca.PlaceOrderRequest{
 		Symbol:        sym,
 		Side:          side,
@@ -203,6 +216,18 @@ func placeOrderInputToSDK(in PlaceOrderInput) (sdkalpaca.PlaceOrderRequest, erro
 		Qty:           in.Qty,
 		Notional:      in.NotionalUSD,
 		LimitPrice:    in.LimitPrice,
+		OrderClass:    orderClass,
+	}
+	if orderClass == sdkalpaca.Bracket {
+		if in.TakeProfitLimitPrice == nil || in.StopLossStopPrice == nil || in.TakeProfitLimitPrice.LessThanOrEqual(decimal.Zero) || in.StopLossStopPrice.LessThanOrEqual(decimal.Zero) {
+			return sdkalpaca.PlaceOrderRequest{}, fmt.Errorf("alpaca: bracket orders require positive take_profit_limit_price and stop_loss_stop_price")
+		}
+		req.TakeProfit = &sdkalpaca.TakeProfit{
+			LimitPrice: in.TakeProfitLimitPrice,
+		}
+		req.StopLoss = &sdkalpaca.StopLoss{
+			StopPrice: in.StopLossStopPrice,
+		}
 	}
 	return req, nil
 }

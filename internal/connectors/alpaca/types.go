@@ -101,6 +101,10 @@ type PlaceOrderInput struct {
 	TimeInForce   string // day | gtc | ... (empty defaults to day)
 	LimitPrice    *decimal.Decimal
 	ClientOrderID string
+	OrderClass    string // simple | bracket (empty defaults to simple)
+	// Bracket legs (used when OrderClass=bracket).
+	TakeProfitLimitPrice *decimal.Decimal
+	StopLossStopPrice    *decimal.Decimal
 }
 
 // OrderSnapshot is a read-only view of an order.

@@ -6,6 +6,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/runtime"
 )
 
 // SettingsStore reads and writes generic key/value settings from app_settings.
@@ -47,7 +50,7 @@ var settingCatalog = []settingDef{
 		Group:           "Agent",
 		Type:            "bool",
 		Default:         false,
-		RequiresRestart: true,
+		RequiresRestart: false,
 	},
 	{
 		Key:             "agent_exec_mode",
@@ -57,25 +60,34 @@ var settingCatalog = []settingDef{
 		Type:            "select",
 		Default:         "off",
 		Options:         []string{"off", "paper_auto"},
-		RequiresRestart: true,
+		RequiresRestart: false,
 	},
 	{
 		Key:             "agent_briefing_cron",
 		Label:           "Briefing cron schedule",
-		Description:     "Standard 5-field cron expression for scheduled briefings (e.g. '0 9-16 * * 1-5' = hourly 9am–4pm weekdays ET).",
+		Description:     "Standard 5-field cron expression for scheduled briefings (e.g. '0 9-16 * * 1-5' = hourly 9am–4pm weekdays ET). Hot-reloaded.",
 		Group:           "Agent",
 		Type:            "string",
 		Default:         "0 9-16 * * 1-5",
-		RequiresRestart: true,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "agent_briefing_tz",
+		Label:           "Briefing cron timezone",
+		Description:     "IANA timezone for interpreting the briefing cron schedule (e.g. America/New_York). Hot-reloaded.",
+		Group:           "Agent",
+		Type:            "string",
+		Default:         "America/New_York",
+		RequiresRestart: false,
 	},
 	{
 		Key:             "agent_model",
 		Label:           "AI model",
-		Description:     "Anthropic model used for briefings (e.g. claude-sonnet-4-5, claude-opus-4-5).",
+		Description:     "Anthropic model used for briefings (e.g. claude-sonnet-4.6, claude-opus-4-5).",
 		Group:           "Agent",
 		Type:            "string",
-		Default:         "claude-sonnet-4-5",
-		RequiresRestart: true,
+		Default:         "claude-sonnet-4.6",
+		RequiresRestart: false,
 	},
 	{
 		Key:             "agent_max_turns",
@@ -102,7 +114,25 @@ var settingCatalog = []settingDef{
 		Group:           "Agent",
 		Type:            "int",
 		Default:         120,
-		RequiresRestart: true,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "agent_max_tokens",
+		Label:           "Max output tokens",
+		Description:     "Maximum tokens the model may generate per briefing response. Increase for longer, more detailed briefings.",
+		Group:           "Agent",
+		Type:            "int",
+		Default:         2048,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "agent_temperature",
+		Label:           "Model temperature",
+		Description:     "Sampling temperature for briefing responses (0.0 = deterministic, 1.0 = very creative). Recommended: 0.1–0.3.",
+		Group:           "Agent",
+		Type:            "number",
+		Default:         0.2,
+		RequiresRestart: false,
 	},
 	// --- Policy ---
 	{
@@ -112,7 +142,7 @@ var settingCatalog = []settingDef{
 		Group:           "Policy",
 		Type:            "bool",
 		Default:         false,
-		RequiresRestart: true,
+		RequiresRestart: false,
 	},
 	{
 		Key:             "policy_mode",
@@ -122,7 +152,7 @@ var settingCatalog = []settingDef{
 		Type:            "select",
 		Default:         "enforce",
 		Options:         []string{"enforce", "monitor"},
-		RequiresRestart: true,
+		RequiresRestart: false,
 	},
 	{
 		Key:             "proposals_enabled",
@@ -132,6 +162,51 @@ var settingCatalog = []settingDef{
 		Type:            "bool",
 		Default:         false,
 		RequiresRestart: true,
+	},
+	{
+		Key:             "policy_max_order_notional_usd",
+		Label:           "Max order size (USD)",
+		Description:     "Hard cap on the notional value of any single order in USD. 0 = no limit.",
+		Group:           "Policy",
+		Type:            "number",
+		Default:         0,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "policy_max_daily_notional_usd",
+		Label:           "Max daily trading volume (USD)",
+		Description:     "Cap on total notional value executed per calendar day in USD. 0 = no limit.",
+		Group:           "Policy",
+		Type:            "number",
+		Default:         0,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "policy_max_position_pct",
+		Label:           "Max position size (% of equity)",
+		Description:     "Maximum post-trade position market value as a percentage of portfolio equity (e.g. 20 = 20%). 0 = no limit.",
+		Group:           "Policy",
+		Type:            "number",
+		Default:         0,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "policy_max_daily_loss_pct",
+		Label:           "Max daily loss (% of equity)",
+		Description:     "Stops trading when portfolio drawdown since open exceeds this percentage of equity (e.g. 2 = 2%). 0 = no limit.",
+		Group:           "Policy",
+		Type:            "number",
+		Default:         0,
+		RequiresRestart: false,
+	},
+	{
+		Key:             "policy_max_orders_per_minute",
+		Label:           "Max orders per minute",
+		Description:     "Rate cap on order submissions per minute. 0 = no limit.",
+		Group:           "Policy",
+		Type:            "int",
+		Default:         0,
+		RequiresRestart: false,
 	},
 	// --- Price Feed ---
 	{
@@ -159,7 +234,34 @@ var settingCatalog = []settingDef{
 		Description:     "How often the price feed fetches fresh quotes from the provider. Lower values cost more API quota.",
 		Group:           "Price Feed",
 		Type:            "int",
-		Default:         60,
+		Default:         900,
+		RequiresRestart: true,
+	},
+	{
+		Key:             "price_feed_watchlist",
+		Label:           "Watched symbols",
+		Description:     "Comma-separated list of symbols actively tracked for price data (e.g. AAPL,MSFT,BTC-USD). The briefing agent also uses this list to discover new trade opportunities.",
+		Group:           "Price Feed",
+		Type:            "string",
+		Default:         "",
+		RequiresRestart: false,
+	},
+	{
+		Key:             "price_feed_max_quote_age_ms",
+		Label:           "Max quote age (ms)",
+		Description:     "Reject upstream quotes older than this many milliseconds. 0 = no staleness check. Default 1800000 (30 min).",
+		Group:           "Price Feed",
+		Type:            "int",
+		Default:         1800000,
+		RequiresRestart: true,
+	},
+	{
+		Key:             "price_feed_dedup_window_ms",
+		Label:           "Dedup window (ms)",
+		Description:     "Skip writing an unchanged price if the same value was written within this window. 0 = disable. Default 60000 (1 min).",
+		Group:           "Price Feed",
+		Type:            "int",
+		Default:         60000,
 		RequiresRestart: true,
 	},
 }
@@ -181,22 +283,14 @@ type settingsPatchResponse struct {
 	Updated []string `json:"updated"`
 }
 
-func getSettingsHandler(store SettingsStore) gin.HandlerFunc {
+func getSettingsHandler(holder *config.ConfigHolder) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		stored, err := store.ListAppSettings(c.Request.Context())
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load settings"})
-			return
-		}
-
+		effective := config.CatalogValues(holder.Get())
 		out := make([]settingResponse, 0, len(settingCatalog))
 		for _, def := range settingCatalog {
 			sr := settingResponse{settingDef: def, Value: def.Default}
-			if raw, ok := stored[def.Key]; ok {
-				var v any
-				if err := json.Unmarshal(raw, &v); err == nil {
-					sr.Value = v
-				}
+			if v, ok := effective[def.Key]; ok {
+				sr.Value = v
 			}
 			out = append(out, sr)
 		}
@@ -204,7 +298,7 @@ func getSettingsHandler(store SettingsStore) gin.HandlerFunc {
 	}
 }
 
-func patchSettingsHandler(store SettingsStore) gin.HandlerFunc {
+func patchSettingsHandler(store SettingsStore, reloader *runtime.SettingsReloader) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req settingsPatchRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -229,6 +323,12 @@ func patchSettingsHandler(store SettingsStore) gin.HandlerFunc {
 				return
 			}
 			updated = append(updated, key)
+		}
+		if reloader != nil {
+			if _, err := reloader.Reload(c.Request.Context()); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "settings saved but failed to apply: " + err.Error()})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, settingsPatchResponse{Updated: updated})
 	}

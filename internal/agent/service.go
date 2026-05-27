@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,9 +28,29 @@ type Service struct {
 	log          *zap.Logger
 	sessionTimeout time.Duration
 	materializer   ProposalMaterializer
+	paperAutoMu    sync.RWMutex
 	paperAuto      *PaperAutoRunner
 	maxTurns       int
 	maxToolCalls   int
+}
+
+// SetPaperAuto swaps the post-briefing autonomous submit runner (nil disables).
+func (s *Service) SetPaperAuto(r *PaperAutoRunner) {
+	if s == nil {
+		return
+	}
+	s.paperAutoMu.Lock()
+	s.paperAuto = r
+	s.paperAutoMu.Unlock()
+}
+
+func (s *Service) paperAutoRunner() *PaperAutoRunner {
+	if s == nil {
+		return nil
+	}
+	s.paperAutoMu.RLock()
+	defer s.paperAutoMu.RUnlock()
+	return s.paperAuto
 }
 
 // WithLimits sets the per-session turn and tool-call caps from config.
@@ -128,6 +149,12 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		return RunBriefingResult{}, fmt.Errorf("agent service: nil tool executor")
 	}
 	sessionID := uuid.New()
+	type sessionCacheCleaner interface {
+		ClearSessionCache(sessionID string)
+	}
+	if cleaner, ok := s.toolExecutor.(sessionCacheCleaner); ok {
+		defer cleaner.ClearSessionCache(sessionID.String())
+	}
 	runDate := req.RunDate.UTC()
 	if runDate.IsZero() {
 		runDate = time.Now().UTC()
@@ -137,13 +164,13 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		trigger = "manual"
 	}
 	if enforceScheduledDailyIdempotency && trigger == "scheduled" {
-		existing, found, err := s.findScheduledSessionForDay(ctx, req.PortfolioID, runDate)
+		existing, found, err := s.findActiveScheduledSession(ctx, req.PortfolioID, time.Now().UTC())
 		if err != nil {
 			return RunBriefingResult{}, fmt.Errorf("check scheduled idempotency: %w", err)
 		}
 		if found {
 			observability.ObserveAgentSessionOutcome("deduped", trigger)
-			s.log.Info("agent_session_skip_in_progress",
+			s.log.Warn("agent_session_skip_in_progress",
 				zap.String("active_session_id", existing.SessionID.String()),
 				zap.String("portfolio_id", req.PortfolioID.String()),
 				zap.String("trigger_source", trigger),
@@ -251,7 +278,14 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		modelName = "claude-3-5-sonnet-latest"
 	}
 	systemPrompt := BriefingSystemPrompt()
-	userPrompt := BuildBriefingUserPromptFromContext(nil, nil, nil, effectiveUserInput)
+	portfolioCtx, marketCtx := s.bootstrapBriefingContext(ctx, req.PortfolioID)
+	userPrompt := BuildBriefingUserPromptFromContext(portfolioCtx, nil, marketCtx, effectiveUserInput)
+	if len(marketCtx) > 2 {
+		s.log.Info("briefing_bootstrap_loaded",
+			zap.String("portfolio_id", req.PortfolioID.String()),
+			zap.Int("market_context_bytes", len(marketCtx)),
+		)
+	}
 	temperature := req.Temperature
 	maxTokens := effectiveMaxTokens
 	messages := []AnthropicMessage{
@@ -551,8 +585,8 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		propIDs, err := s.materializer.Materialize(matCtx, req.PortfolioID, sessionID, validated)
 		if err != nil {
 			s.log.Warn("proposal_materialize_failed", zap.Error(err))
-		} else if s.paperAuto != nil && len(propIDs) > 0 {
-			go s.paperAuto.RunAfterMaterialize(context.Background(), req.PortfolioID, propIDs)
+		} else if pa := s.paperAutoRunner(); pa != nil && len(propIDs) > 0 {
+			go pa.RunAfterMaterialize(context.Background(), req.PortfolioID, propIDs)
 		}
 	}
 	terminalPersisted = true
@@ -677,6 +711,24 @@ func toolResultContentAsJSONString(raw json.RawMessage) json.RawMessage {
 
 func nullableStr(v string) *string {
 	return strPtr(v)
+}
+
+func (s *Service) bootstrapBriefingContext(ctx context.Context, portfolioID uuid.UUID) (portfolioCtx, marketCtx json.RawMessage) {
+	if s == nil || s.toolExecutor == nil {
+		return nil, nil
+	}
+	boot, ok := s.toolExecutor.(BriefingBootstrapper)
+	if !ok {
+		return nil, nil
+	}
+	pCtx, mCtx, err := boot.BootstrapBriefingContext(ctx, portfolioID)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("briefing_bootstrap_failed", zap.String("portfolio_id", portfolioID.String()), zap.Error(err))
+		}
+		return nil, nil
+	}
+	return pCtx, mCtx
 }
 
 func enrichBriefingUserInput(req RunBriefingRequest) (json.RawMessage, error) {
@@ -814,11 +866,14 @@ func isUnknownLike(v string) bool {
 	return s == "" || s == "unknown" || s == "n/a" || s == "na" || s == "tbd" || s == "-"
 }
 
-// findScheduledSessionForDay returns any scheduled session for this portfolio that is
-// currently active (queued or running). Completed and failed sessions are intentionally
-// ignored so that hourly cron ticks can run multiple briefings per day; only concurrent
-// duplicates are suppressed.
-func (s *Service) findScheduledSessionForDay(ctx context.Context, portfolioID uuid.UUID, _ time.Time) (events.AgentSession, bool, error) {
+// findActiveScheduledSession returns a scheduled session for this portfolio that is
+// currently in-flight (queued or running) and was started recently enough to plausibly
+// still be running. Stale sessions older than `staleAfter` are ignored so a single
+// crashed/orphaned row doesn't permanently suppress future scheduled ticks.
+//
+// Only scheduled-trigger sessions can suppress a new scheduled tick; in-flight manual
+// briefings do NOT block scheduled runs.
+func (s *Service) findActiveScheduledSession(ctx context.Context, portfolioID uuid.UUID, now time.Time) (events.AgentSession, bool, error) {
 	list, err := s.store.ListAgentSessionsForPortfolio(ctx, portfolioID, events.AgentSessionListFilter{
 		Limit:  50,
 		Offset: 0,
@@ -826,11 +881,39 @@ func (s *Service) findScheduledSessionForDay(ctx context.Context, portfolioID uu
 	if err != nil {
 		return events.AgentSession{}, false, err
 	}
+	// Anything older than 2x the session timeout is almost certainly a crash leftover.
+	staleAfter := s.sessionTimeout * 2
+	if staleAfter < 10*time.Minute {
+		staleAfter = 10 * time.Minute
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-staleAfter)
 	for _, item := range list {
 		st := strings.TrimSpace(item.Status)
-		if st == "queued" || st == "running" {
-			return item, true, nil
+		if st != "queued" && st != "running" {
+			continue
 		}
+		if strings.TrimSpace(item.TriggerSource) != "scheduled" {
+			continue
+		}
+		started := item.CreatedAt
+		if item.StartedAt != nil && !item.StartedAt.IsZero() {
+			started = *item.StartedAt
+		}
+		if started.Before(cutoff) {
+			// Stale row from a previous crash; do not let it block new scheduled ticks.
+			s.log.Warn("agent_session_stale_active_ignored",
+				zap.String("session_id", item.SessionID.String()),
+				zap.String("portfolio_id", portfolioID.String()),
+				zap.String("status", st),
+				zap.Time("created_at", item.CreatedAt),
+				zap.Time("cutoff", cutoff),
+			)
+			continue
+		}
+		return item, true, nil
 	}
 	return events.AgentSession{}, false, nil
 }

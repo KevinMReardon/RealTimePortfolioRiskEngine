@@ -719,6 +719,32 @@ func (s *PostgresStore) CompleteAgentSessionFailure(ctx context.Context, session
 	return nil
 }
 
+// MarkStaleAgentSessionsFailed transitions agent_sessions rows in 'queued' or 'running' state
+// that were created before olderThan into the 'failed' state, attaching the supplied reason
+// as error_message. Returns the number of affected rows.
+//
+// This is intended for boot-time recovery: a crash mid-session would otherwise leave a row
+// that blocks the scheduler's idempotency check from queuing any new scheduled briefings.
+func (s *PostgresStore) MarkStaleAgentSessionsFailed(ctx context.Context, olderThan time.Time, reason string) (int64, error) {
+	if reason == "" {
+		reason = "stale_session_recovered_at_boot"
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE agent_sessions
+		SET status = 'failed',
+		    error_code = COALESCE(error_code, 'stale_session'),
+		    error_message = COALESCE(error_message, $2),
+		    completed_at = COALESCE(completed_at, NOW()),
+		    updated_at = NOW()
+		WHERE status IN ('queued','running')
+		  AND created_at < $1
+	`, olderThan.UTC(), reason)
+	if err != nil {
+		return 0, fmt.Errorf("mark stale agent sessions failed: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *PostgresStore) GetLatestAgentSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (AgentSession, bool, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT
