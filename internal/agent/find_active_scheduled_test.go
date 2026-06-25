@@ -85,8 +85,8 @@ func TestFindActiveScheduledSession_IgnoresStaleScheduled(t *testing.T) {
 			PortfolioID:   portfolioID,
 			TriggerSource: "scheduled",
 			Status:        "running",
-			// session timeout is 45s so staleAfter = max(10m, 90s) = 10m.
-			CreatedAt: now.Add(-30 * time.Minute),
+			// session timeout is 45s so staleAfter floors at 90m for long briefings.
+			CreatedAt: now.Add(-2 * time.Hour),
 		},
 	})
 	_, found, err := svc.findActiveScheduledSession(context.Background(), portfolioID, now)
@@ -119,5 +119,35 @@ func TestFindActiveScheduledSession_UsesStartedAtWhenPresent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected freshly-started session to be detected")
+	}
+}
+
+func TestFindActiveScheduledSession_UsesTargetedStoreLookup(t *testing.T) {
+	portfolioID := uuid.New()
+	now := time.Now().UTC()
+	active := events.AgentSession{
+		SessionID:     uuid.New(),
+		PortfolioID:   portfolioID,
+		TriggerSource: "scheduled",
+		Status:        "running",
+		CreatedAt:     now.Add(-1 * time.Minute),
+	}
+	store := &mockAgentStore{
+		activeScheduled:      active,
+		activeScheduledFound: true,
+	}
+	// If findActiveScheduledSession still depended on the generic latest-50 list,
+	// this empty list would miss the active session.
+	store.list = nil
+	svc := &Service{store: store, log: zap.NewNop(), sessionTimeout: 45 * time.Second}
+	got, found, err := svc.findActiveScheduledSession(context.Background(), portfolioID, now)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected targeted active scheduled lookup to find session")
+	}
+	if got.SessionID != active.SessionID {
+		t.Fatalf("returned wrong session: got=%s want=%s", got.SessionID, active.SessionID)
 	}
 }

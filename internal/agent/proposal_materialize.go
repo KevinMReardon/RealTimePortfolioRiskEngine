@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -59,10 +60,58 @@ type BriefingProposalMaterializer struct {
 	TradingHalt bool
 	// Runtime when set supplies Policy and TradingHalt on each Materialize call.
 	Runtime *config.ConfigHolder
+	// AnchorEnsurer optionally ensures today's equity anchor exists before policy evaluation.
+	AnchorEnsurer EquityAnchorEnsurer
 	Log     *zap.Logger
 }
 
 var _ ProposalMaterializer = (*BriefingProposalMaterializer)(nil)
+
+// PolicyLimitsForPortfolio returns POLICY_LIMITS JSON for briefing prompts (nil when no caps configured).
+func (m *BriefingProposalMaterializer) PolicyLimitsForPortfolio(ctx context.Context, portfolioID uuid.UUID) json.RawMessage {
+	if m == nil || m.Loader == nil {
+		return nil
+	}
+	pol := m.Policy
+	if m.Runtime != nil {
+		pol = m.Runtime.Get().PolicyConfig()
+	}
+	nyLoc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		nyLoc = time.FixedZone("America/New_York", -5*3600)
+	}
+	nowNY := time.Now().In(nyLoc)
+	in, found, err := m.Loader.LoadPortfolioAssemblerInput(ctx, portfolioID)
+	if err != nil || !found {
+		return nil
+	}
+	anchorDate := todayAnchorDateUTC(time.Now())
+	m.ensureTodayEquityAnchor(ctx, portfolioID)
+	equityAnchor := decimal.Zero
+	if m.Store != nil {
+		if eq, ok, err := m.Store.LoadEquityAnchorForPortfolioDate(ctx, portfolioID, anchorDate); err == nil && ok {
+			equityAnchor = eq
+		}
+	}
+	tradingHalt := m.TradingHalt
+	if m.Runtime != nil {
+		tradingHalt = m.Runtime.Get().TradingHalt
+	}
+	killEnv, killDB := false, false
+	if m.Store != nil {
+		dbKillActive, dbKillPresent, err := m.Store.KillSwitchLatestActive(ctx)
+		if err == nil {
+			killEnv, killDB = proposals.KillSwitchInputs(tradingHalt, dbKillActive, dbKillPresent)
+		}
+	}
+	snap := policy.BuildSnapshot(in, equityAnchor, nowNY, killEnv, killDB)
+	if m.Usage != nil {
+		if dailyNotional, ordersLastMin, err := m.Usage.LoadDailyUsage(ctx, portfolioID, nowNY); err == nil {
+			policy.ApplyDailyUsage(&snap, dailyNotional, ordersLastMin)
+		}
+	}
+	return policy.BriefingLimitsJSON(pol, snap)
+}
 
 // Materialize inserts one proposal per materializable trade idea (idempotent on session index).
 func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfolioID, sessionID uuid.UUID, out BriefingOutput) ([]uuid.UUID, error) {
@@ -85,7 +134,8 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 		nyLoc = time.FixedZone("America/New_York", -5*3600)
 	}
 	nowNY := time.Now().In(nyLoc)
-	anchorDate := time.Date(nowNY.Year(), nowNY.Month(), nowNY.Day(), 0, 0, 0, 0, time.UTC)
+	anchorDate := todayAnchorDateUTC(time.Now())
+	m.ensureTodayEquityAnchor(ctx, portfolioID)
 	equityAnchor := decimal.Zero
 	if eq, ok, err := m.Store.LoadEquityAnchorForPortfolioDate(ctx, portfolioID, anchorDate); err != nil {
 		m.Log.Warn("proposal_materialize_equity_anchor", zap.Error(err))
@@ -162,6 +212,7 @@ func (m *BriefingProposalMaterializer) Materialize(ctx context.Context, portfoli
 			m.Log.Warn("proposal_materialize_skip_idea", zap.Int("trade_idea_index", i), zap.Error(err))
 			continue
 		}
+		intent = policy.ClampIntentNotional(intent, snap, pol)
 		decision := policy.Evaluate(intent, snap, pol)
 		idx := i
 		rat := strings.TrimSpace(idea.Rationale)
@@ -270,6 +321,27 @@ func intentFromBriefingIdea(idea BriefingIdea) (policy.Intent, error) {
 		TimeInForce: strings.TrimSpace(idea.TimeInForce),
 		LimitPrice:  lim,
 	}, nil
+}
+
+func (m *BriefingProposalMaterializer) ensureTodayEquityAnchor(ctx context.Context, portfolioID uuid.UUID) {
+	if m == nil || m.AnchorEnsurer == nil || m.Keys == nil {
+		return
+	}
+	log := m.Log
+	if log == nil {
+		log = zap.NewNop()
+	}
+	keys, linked, err := m.Keys.LoadPortfolioAlpacaKeyMaterial(ctx, portfolioID)
+	if err != nil {
+		log.Warn("proposal_materialize_equity_anchor_ensure_keys_failed",
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.Error(err))
+		return
+	}
+	if !linked {
+		return
+	}
+	m.AnchorEnsurer.EnsureTodayForPortfolioKeys(ctx, portfolioID, keys)
 }
 
 // BuildPolicySnapshot delegates to policy.BuildSnapshot for callers that still use the agent name.

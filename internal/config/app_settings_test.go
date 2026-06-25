@@ -3,22 +3,24 @@ package config
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 )
 
 func TestOverlayAppSettings_DBOverridesEnv(t *testing.T) {
 	base := Config{
-		AgentExecMode:       AgentExecModeOff,
-		TradingHalt:         false,
-		PolicyMode:          policy.ModeEnforce,
-		ProposalsEnabled:    false,
+		AgentExecMode:        AgentExecModeOff,
+		TradingHalt:          false,
+		PolicyMode:           policy.ModeEnforce,
+		ProposalsEnabled:     false,
 		AgentBriefingEnabled: false,
 	}
 	stored := map[string]json.RawMessage{
-		SettingAgentExecMode:     json.RawMessage(`"paper_auto"`),
-		SettingTradingHalt:     json.RawMessage(`true`),
-		SettingProposalsEnabled: json.RawMessage(`true`),
+		SettingAgentExecMode:                json.RawMessage(`"paper_auto"`),
+		SettingAgentBriefingCooldownMinutes: json.RawMessage(`15`),
+		SettingTradingHalt:                  json.RawMessage(`true`),
+		SettingProposalsEnabled:             json.RawMessage(`true`),
 	}
 	out, err := OverlayAppSettings(base, stored)
 	if err != nil {
@@ -32,6 +34,9 @@ func TestOverlayAppSettings_DBOverridesEnv(t *testing.T) {
 	}
 	if !out.ProposalsEnabled {
 		t.Fatal("expected proposals enabled")
+	}
+	if out.AgentBriefingCooldown != 15*time.Minute {
+		t.Fatalf("expected 15 minute cooldown, got %v", out.AgentBriefingCooldown)
 	}
 }
 

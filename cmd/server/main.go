@@ -76,6 +76,7 @@ func run() error {
 	logger.Info("config_effective",
 		zap.String("agent_exec_mode", cfg.AgentExecMode),
 		zap.Bool("agent_briefing_enabled", cfg.AgentBriefingEnabled),
+		zap.Duration("agent_briefing_cooldown", cfg.AgentBriefingCooldown),
 		zap.Bool("proposals_enabled", cfg.ProposalsEnabled),
 		zap.Bool("trading_halt", cfg.TradingHalt),
 		zap.String("policy_mode", string(cfg.PolicyMode)),
@@ -233,12 +234,12 @@ func run() error {
 			go func() {
 				defer alpacaWG.Done()
 				(&alpacarecon.Worker{
-					Store:        proposalStore,
-					Targets:      alpacaReconTargetLister{repo: repo},
-					NewREST:      func(c alpaca.RESTConfig) (alpaca.REST, error) { return alpaca.NewREST(c) },
-					Interval:     time.Minute,
+					Store:          proposalStore,
+					Targets:        alpacaReconTargetLister{repo: repo},
+					NewREST:        func(c alpaca.RESTConfig) (alpaca.REST, error) { return alpaca.NewREST(c) },
+					Interval:       time.Minute,
 					OrdersLookback: 48 * time.Hour,
-					Log:          logger,
+					Log:            logger,
 				}).Run(alpacaCtx)
 			}()
 			logger.Info("alpaca_orders_recon_worker_spawned",
@@ -390,8 +391,15 @@ func run() error {
 	var anthropicClient agent.AnthropicClient
 	var paperAutoRetryRunner *agent.PaperAutoRetryRunner
 	var submitUsage submit.DailyUsageLoader
+	var equityAnchorJob *runtime.EquityAnchorJob
 	if proposalStore != nil {
 		submitUsage = proposalStore
+		equityAnchorJob = &runtime.EquityAnchorJob{
+			Targets: repo,
+			Anchor:  proposalStore,
+			NewREST: func(c alpaca.RESTConfig) (alpaca.REST, error) { return alpaca.NewREST(c) },
+			Log:     logger,
+		}
 	}
 	submitDeps := submit.Deps{
 		Store:         proposalStore,
@@ -417,6 +425,7 @@ func run() error {
 				Enabled:              true,
 				Timeout:              effective.AgentPaperAutoTimeout,
 				MaxSubmitsPerSession: effective.AgentMaxAutoSubmitsPerSession,
+				MaxAutoRetries:       3,
 			},
 			Critic: &agent.Critic{
 				Client: anthropicClient,
@@ -434,7 +443,9 @@ func run() error {
 		if strings.TrimSpace(cfg.AnthropicAPIKey) == "" {
 			logger.Warn("agent_briefing_disabled_missing_api_key")
 		} else {
-			anthropicClient = agent.NewHTTPAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL)
+			anthropicClient = &agent.SerializedAnthropicClient{
+				Inner: agent.NewHTTPAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL),
+			}
 			var proposalMaterializer agent.ProposalMaterializer
 			var proposalSubmitter agent.ProposalSubmitter
 			var briefingMaterializer *agent.BriefingProposalMaterializer
@@ -448,6 +459,7 @@ func run() error {
 					Policy:      cfg.PolicyConfig(),
 					TradingHalt: cfg.TradingHalt,
 					Runtime:     cfgHolder,
+					AnchorEnsurer: equityAnchorJob,
 					Log:         logger,
 				}
 				proposalMaterializer = briefingMaterializer
@@ -503,16 +515,18 @@ func run() error {
 				proposalMaterializer,
 				paperAuto,
 			).WithLimits(cfg.AgentMaxTurns, cfg.AgentMaxToolCalls)
+			svc.SetScheduledCooldown(cfg.AgentBriefingCooldown)
 			agentSvc = svc
 			if paperAuto != nil {
 				paperAutoRetryRunner = &agent.PaperAutoRetryRunner{
 					Config: agent.PaperAutoRetryConfig{
 						Enabled:    true,
 						Interval:   3 * time.Minute,
-						Lookback:   24 * time.Hour,
 						MaxPerTick: 10,
+						MaxRetries: 3,
 					},
 					Auto:    paperAuto,
+					Gate:    repo,
 					Catalog: repo,
 					Log:     logger,
 				}
@@ -577,17 +591,20 @@ func run() error {
 	}
 
 	// EquityAnchor job: writes today's start-of-day equity from Alpaca so policy daily-loss rule works.
-	if proposalStore != nil {
-		anchorJob := &runtime.EquityAnchorJob{
-			Targets: repo,
-			Anchor:  proposalStore,
-			NewREST: func(c alpaca.RESTConfig) (alpaca.REST, error) { return alpaca.NewREST(c) },
-			Log:     logger,
-		}
-		anchorSched := &runtime.EquityAnchorScheduler{Job: anchorJob, Log: logger}
+	if equityAnchorJob != nil {
+		anchorSched := &runtime.EquityAnchorScheduler{Job: equityAnchorJob, Log: logger}
 		if err := anchorSched.Start(agentBriefingCtx); err != nil {
 			logger.Warn("equity_anchor_scheduler_start_failed", zap.Error(err))
 		}
+		ensureInterval := cfg.EquityAnchorEnsureInterval
+		if ensureInterval <= 0 {
+			ensureInterval = 15 * time.Minute
+		}
+		go (&runtime.EquityAnchorEnsureRunner{
+			Job:      equityAnchorJob,
+			Interval: ensureInterval,
+			Log:      logger,
+		}).Run(agentBriefingCtx)
 	}
 
 	settingsReloader := &runtime.SettingsReloader{
@@ -634,13 +651,14 @@ func run() error {
 		AgentService:              agentSvc,
 		AgentMaxTokens:            cfg.AgentMaxTokens,
 		AgentTemperature:          cfg.AgentTemperature,
-		ProposalsStore:      proposalStore,
-		ProposalAlpacaKeys:  repo,
-		ProposalPolicy:      cfg.PolicyConfig(),
-		ProposalTradingHalt: cfg.TradingHalt,
-		SettingsStore:       repo,
-		SettingsReloader:    settingsReloader,
-		RuntimeConfig:       cfgHolder,
+		ProposalsStore:            proposalStore,
+		ProposalAlpacaKeys:        repo,
+		ProposalPolicy:            cfg.PolicyConfig(),
+		ProposalTradingHalt:       cfg.TradingHalt,
+		SettingsStore:             repo,
+		SettingsReloader:          settingsReloader,
+		SchedulerManager:          schedMgr,
+		RuntimeConfig:             cfgHolder,
 	})
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

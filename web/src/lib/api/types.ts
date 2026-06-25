@@ -240,7 +240,12 @@ export type ProposalDTO = {
   payload_hash: string;
   policy_inputs_hash: string;
   policy_config_hash: string;
+  policy_result?: unknown;
   rationale_snapshot?: string | null;
+  critic_verdict?: unknown;
+  critic_completed_at?: string | null;
+  critic_model?: string | null;
+  approval_source?: string | null;
 };
 
 export type ListProposalsResponse = {

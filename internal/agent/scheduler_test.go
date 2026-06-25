@@ -25,6 +25,9 @@ func (s stubEligibilityLister) ListAgentBriefingEligiblePortfolios(ctx context.C
 
 type countingAgentService struct {
 	scheduledCalls atomic.Int32
+	activeCalls    atomic.Int32
+	maxConcurrent  atomic.Int32
+	delay          time.Duration
 }
 
 func (c *countingAgentService) RunBriefing(ctx context.Context, req RunBriefingRequest) (RunBriefingResult, error) {
@@ -37,6 +40,17 @@ func (c *countingAgentService) CreateBriefingOnDemand(ctx context.Context, req R
 }
 func (c *countingAgentService) CreateBriefingScheduled(ctx context.Context, req RunBriefingRequest) (RunBriefingResult, error) {
 	_, _ = ctx, req
+	active := c.activeCalls.Add(1)
+	for {
+		currentMax := c.maxConcurrent.Load()
+		if active <= currentMax || c.maxConcurrent.CompareAndSwap(currentMax, active) {
+			break
+		}
+	}
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	defer c.activeCalls.Add(-1)
 	c.scheduledCalls.Add(1)
 	return RunBriefingResult{}, nil
 }
@@ -228,6 +242,36 @@ func TestBriefingCronScheduler_CronTriggersExecution(t *testing.T) {
 	}
 	if n := svc.scheduledCalls.Load(); n < 2 {
 		t.Fatalf("expected at least 2 cron-driven runs, got %d", n)
+	}
+}
+
+func TestBriefingCronScheduler_SkipsWhenPreviousTickStillRunning(t *testing.T) {
+	logger := zap.NewNop()
+	svc := &countingAgentService{delay: 1500 * time.Millisecond}
+	cat := stubEligibilityLister{rows: []events.AgentBriefingEligiblePortfolio{{PortfolioID: uuid.New(), OwnerUserID: uuid.New()}}}
+	sched, err := NewBriefingCronScheduler(logger, svc, cat, "* * * * * *", "UTC", withCronSecondsField())
+	if err != nil {
+		t.Fatalf("NewBriefingCronScheduler: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sched.Run(ctx)
+	}()
+	time.Sleep(2200 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler Run did not exit after cancel")
+	}
+	if got := svc.maxConcurrent.Load(); got > 1 {
+		t.Fatalf("expected no concurrent scheduled ticks, maxConcurrent=%d", got)
+	}
+	if got := svc.scheduledCalls.Load(); got > 2 {
+		t.Fatalf("expected overlapping ticks to be skipped, calls=%d", got)
 	}
 }
 

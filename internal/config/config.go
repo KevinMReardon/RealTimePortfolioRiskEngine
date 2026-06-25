@@ -44,6 +44,7 @@ const (
 	defaultPriceFeedAlpacaRPM     = 200
 	defaultAgentBriefingCron      = "0 9-16 * * 1-5"
 	defaultAgentBriefingTZ        = "America/New_York"
+	defaultAgentBriefingCooldownM = 30
 	defaultAgentModel             = "claude-sonnet-4.6"
 	defaultAgentMaxTokens         = 2048
 	defaultAgentTemperature       = 0.2
@@ -53,8 +54,9 @@ const (
 	defaultPolicyMode             = "enforce"
 
 	// Phase 3 autonomous execution (AGENT_EXEC_MODE); orchestration is wired in later PRs.
-	defaultAgentPaperAutoTimeoutSec      = 300 // 5 minutes
-	defaultAgentMaxAutoSubmitsPerSession = 5
+	defaultAgentPaperAutoTimeoutSec         = 300 // 5 minutes
+	defaultAgentMaxAutoSubmitsPerSession    = 5
+	defaultEquityAnchorEnsureIntervalMin    = 15
 )
 
 // Agent execution modes for AGENT_EXEC_MODE (exact env strings; default off).
@@ -216,12 +218,15 @@ type Config struct {
 	// AgentBriefingSchedulerEnabled toggles scheduled daily briefings.
 	// Env: AGENT_BRIEFING_SCHEDULER_ENABLED.
 	AgentBriefingSchedulerEnabled bool
-	// AgentBriefingCron is the 5-field cron schedule for daily briefings.
-	// Env: AGENT_BRIEFING_CRON (default "0 13 * * 1-5").
+	// AgentBriefingCron is the 5-field cron schedule for scheduled briefings.
+	// Env: AGENT_BRIEFING_CRON (default "0 9-16 * * 1-5", hourly on weekdays).
 	AgentBriefingCron string
 	// AgentBriefingTZ is IANA timezone for cron interpretation.
 	// Env: AGENT_BRIEFING_TZ (default "America/New_York").
 	AgentBriefingTZ string
+	// AgentBriefingCooldown is the minimum wait between successful scheduled briefings.
+	// Env: AGENT_BRIEFING_COOLDOWN_MINUTES (default 30; 0 disables cooldown).
+	AgentBriefingCooldown time.Duration
 	// AnthropicAPIKey from ANTHROPIC_API_KEY (trimmed). Empty disables provider calls.
 	AnthropicAPIKey string
 	// AnthropicBaseURL from ANTHROPIC_BASE_URL (optional).
@@ -256,6 +261,9 @@ type Config struct {
 	// AgentMaxAutoSubmitsPerSession caps broker submits per agent session (future orchestration).
 	// Env: AGENT_MAX_AUTO_SUBMITS_PER_SESSION (default 5; min 1).
 	AgentMaxAutoSubmitsPerSession int
+	// EquityAnchorEnsureInterval is how often the server retries missing NY-day equity anchors.
+	// Env: EQUITY_ANCHOR_ENSURE_INTERVAL_MINUTES (default 15; min 1).
+	EquityAnchorEnsureInterval time.Duration
 
 	// --- Phase 2 proposals / policy-as-code (HTTP wiring optional; see PROPOSALS_ENABLED) ---
 	// ProposalsEnabled toggles proposal persistence APIs when implemented.
@@ -473,6 +481,10 @@ func Load() (Config, error) {
 	if agentBriefingTZ == "" {
 		agentBriefingTZ = defaultAgentBriefingTZ
 	}
+	agentBriefingCooldownMins := getEnvInt("AGENT_BRIEFING_COOLDOWN_MINUTES", defaultAgentBriefingCooldownM)
+	if agentBriefingCooldownMins < 0 {
+		agentBriefingCooldownMins = 0
+	}
 	agentModel := strings.TrimSpace(getEnv("AGENT_MODEL", defaultAgentModel))
 	if agentModel == "" {
 		agentModel = defaultAgentModel
@@ -549,6 +561,10 @@ func Load() (Config, error) {
 	if agentMaxAutoSubmits < 1 {
 		agentMaxAutoSubmits = defaultAgentMaxAutoSubmitsPerSession
 	}
+	equityAnchorEnsureMin := getEnvInt("EQUITY_ANCHOR_ENSURE_INTERVAL_MINUTES", defaultEquityAnchorEnsureIntervalMin)
+	if equityAnchorEnsureMin < 1 {
+		equityAnchorEnsureMin = defaultEquityAnchorEnsureIntervalMin
+	}
 
 	policyMaxOrdersPerMinute := getEnvInt("POLICY_MAX_ORDERS_PER_MINUTE", 0)
 	if policyMaxOrdersPerMinute < 0 {
@@ -616,22 +632,24 @@ func Load() (Config, error) {
 			"AGENT_BRIEFING_SCHEDULER_ENABLED",
 			false,
 		),
-		AgentBriefingCron:   agentBriefingCron,
-		AgentBriefingTZ:     agentBriefingTZ,
-		AnthropicAPIKey:     strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
-		AnthropicBaseURL:    strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
-		AgentModel:          agentModel,
-		AgentMaxTokens:      agentMaxTokens,
-		AgentTemperature:    agentTemperature,
-		AgentMaxToolCalls:   agentMaxToolCalls,
-		AgentMaxTurns:       agentMaxTurns,
-		AgentSessionTimeout: time.Duration(agentSessionTimeoutSec) * time.Second,
+		AgentBriefingCron:     agentBriefingCron,
+		AgentBriefingTZ:       agentBriefingTZ,
+		AgentBriefingCooldown: time.Duration(agentBriefingCooldownMins) * time.Minute,
+		AnthropicAPIKey:       strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
+		AnthropicBaseURL:      strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+		AgentModel:            agentModel,
+		AgentMaxTokens:        agentMaxTokens,
+		AgentTemperature:      agentTemperature,
+		AgentMaxToolCalls:     agentMaxToolCalls,
+		AgentMaxTurns:         agentMaxTurns,
+		AgentSessionTimeout:   time.Duration(agentSessionTimeoutSec) * time.Second,
 
 		AgentExecMode: execEffective,
 		AgentExecPaperAutoSuppressedDueToMonitorPolicy: execSuppressedByMonitor,
 		AgentCriticModel:              agentCriticModel,
 		AgentPaperAutoTimeout:         time.Duration(agentPaperAutoTimeoutSec) * time.Second,
 		AgentMaxAutoSubmitsPerSession: agentMaxAutoSubmits,
+		EquityAnchorEnsureInterval:    time.Duration(equityAnchorEnsureMin) * time.Minute,
 
 		ProposalsEnabled:          getEnvBool("PROPOSALS_ENABLED", false),
 		TradingHalt:               getEnvBool("TRADING_HALT", false),

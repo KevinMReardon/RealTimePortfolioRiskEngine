@@ -767,6 +767,99 @@ func (s *PostgresStore) GetLatestAgentSessionForPortfolio(ctx context.Context, p
 	return out, true, nil
 }
 
+func (s *PostgresStore) GetLatestSucceededScheduledSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (AgentSession, bool, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE portfolio_id = $1
+		  AND trigger_source = 'scheduled'
+		  AND status = 'succeeded'
+		ORDER BY completed_at DESC NULLS LAST, created_at DESC, session_id DESC
+		LIMIT 1
+	`, portfolioID)
+	out, err := s.scanAgentSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentSession{}, false, nil
+	}
+	if err != nil {
+		return AgentSession{}, false, fmt.Errorf("get latest succeeded scheduled session for portfolio: %w", err)
+	}
+	return out, true, nil
+}
+
+// GetLatestSucceededAgentSessionForPortfolio returns the newest succeeded briefing (manual or scheduled).
+func (s *PostgresStore) GetLatestSucceededAgentSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (AgentSession, bool, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE portfolio_id = $1
+		  AND status = 'succeeded'
+		ORDER BY completed_at DESC NULLS LAST, created_at DESC, session_id DESC
+		LIMIT 1
+	`, portfolioID)
+	out, err := s.scanAgentSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentSession{}, false, nil
+	}
+	if err != nil {
+		return AgentSession{}, false, fmt.Errorf("get latest succeeded agent session for portfolio: %w", err)
+	}
+	return out, true, nil
+}
+
+// PortfolioHasActiveBriefing is true when a session is queued or running for the portfolio.
+func (s *PostgresStore) PortfolioHasActiveBriefing(ctx context.Context, portfolioID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM agent_sessions
+			WHERE portfolio_id = $1
+			  AND status IN ('queued', 'running')
+		)
+	`, portfolioID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("portfolio has active briefing: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *PostgresStore) GetActiveScheduledSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID, staleAfter time.Duration) (AgentSession, bool, error) {
+	if staleAfter <= 0 {
+		staleAfter = 90 * time.Minute
+	}
+	cutoff := time.Now().UTC().Add(-staleAfter)
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			session_id, portfolio_id, requested_by_user_id, trigger_source, run_date, status,
+			provider, model, temperature::text, max_tokens, system_prompt, user_prompt, response_raw,
+			response_validated, validation_errors, input_tokens, output_tokens, tool_call_count,
+			estimated_cost_usd::text, error_code, error_message, started_at, completed_at, created_at, updated_at
+		FROM agent_sessions
+		WHERE portfolio_id = $1
+		  AND trigger_source = 'scheduled'
+		  AND status IN ('queued', 'running')
+		  AND COALESCE(started_at, created_at) >= $2
+		ORDER BY COALESCE(started_at, created_at) DESC, created_at DESC, session_id DESC
+		LIMIT 1
+	`, portfolioID, cutoff)
+	out, err := s.scanAgentSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentSession{}, false, nil
+	}
+	if err != nil {
+		return AgentSession{}, false, fmt.Errorf("get active scheduled session for portfolio: %w", err)
+	}
+	return out, true, nil
+}
+
 func (s *PostgresStore) ListAgentSessionsForPortfolio(ctx context.Context, portfolioID uuid.UUID, filter AgentSessionListFilter) ([]AgentSession, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -1300,7 +1393,7 @@ func (s *PostgresStore) LoadProjectionCursor(ctx context.Context, portfolioID uu
 	return t, nil
 }
 
-// LoadPortfolioAssemblerInput reads projection rows plus marks for open symbols and returns
+// LoadPortfolioAssemblerInput reads projection rows plus latest marks and returns
 // the pure assembler input for GET /v1/portfolios/{id}. found=false means unknown portfolio id.
 func (s *PostgresStore) LoadPortfolioAssemblerInput(ctx context.Context, portfolioID uuid.UUID) (portfolio.PortfolioAssemblerInput, bool, error) {
 	var exists bool
@@ -1317,17 +1410,15 @@ func (s *PostgresStore) LoadPortfolioAssemblerInput(ctx context.Context, portfol
 		return portfolio.PortfolioAssemblerInput{}, false, nil
 	}
 
-	posRows, openSymbols, err := s.loadPositionsForPortfolio(ctx, portfolioID)
+	posRows, _, err := s.loadPositionsForPortfolio(ctx, portfolioID)
 	if err != nil {
 		return portfolio.PortfolioAssemblerInput{}, true, err
 	}
 
 	priceBySymbol := map[string]portfolio.PriceMarkInput{}
-	if len(openSymbols) > 0 {
-		priceBySymbol, err = s.loadPriceMarksBySymbol(ctx, openSymbols)
-		if err != nil {
-			return portfolio.PortfolioAssemblerInput{}, true, err
-		}
+	priceBySymbol, err = s.loadAllPriceMarks(ctx)
+	if err != nil {
+		return portfolio.PortfolioAssemblerInput{}, true, err
 	}
 
 	cur, err := s.LoadProjectionCursor(ctx, portfolioID)
@@ -1628,6 +1719,51 @@ func (s *PostgresStore) loadPriceMarksBySymbol(ctx context.Context, symbols []st
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate price rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) loadAllPriceMarks(ctx context.Context) (map[string]portfolio.PriceMarkInput, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT pr.symbol, pr.price::text, pr.as_of, pr.as_of_event_id, e.created_at
+		FROM prices_projection pr
+		LEFT JOIN events e ON e.event_id = pr.as_of_event_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query all prices_projection: %w", err)
+	}
+	defer rows.Close()
+	return scanPriceMarks(rows)
+}
+
+func scanPriceMarks(rows pgx.Rows) (map[string]portfolio.PriceMarkInput, error) {
+	out := make(map[string]portfolio.PriceMarkInput)
+	for rows.Next() {
+		var symbol, priceStr string
+		var asOf time.Time
+		var asOfEventID *uuid.UUID
+		var procTime *time.Time
+		if err := rows.Scan(&symbol, &priceStr, &asOf, &asOfEventID, &procTime); err != nil {
+			return nil, fmt.Errorf("scan price row: %w", err)
+		}
+		p, err := decimal.NewFromString(priceStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse price for %s: %w", symbol, err)
+		}
+		pm := portfolio.PriceMarkInput{
+			Price:         p,
+			AsOfEventTime: asOf.UTC(),
+		}
+		if asOfEventID != nil {
+			pm.AsOfEventID = *asOfEventID
+		}
+		if procTime != nil {
+			pm.ProcessingTime = procTime.UTC()
+		}
+		out[symbol] = pm
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

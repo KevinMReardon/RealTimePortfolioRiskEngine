@@ -14,6 +14,7 @@ func TestLoadAgentBriefingDefaults(t *testing.T) {
 	t.Setenv("AGENT_BRIEFING_SCHEDULER_ENABLED", "")
 	t.Setenv("AGENT_BRIEFING_CRON", "")
 	t.Setenv("AGENT_BRIEFING_TZ", "")
+	t.Setenv("AGENT_BRIEFING_COOLDOWN_MINUTES", "")
 	t.Setenv("AGENT_MODEL", "")
 	t.Setenv("AGENT_MAX_TOKENS", "")
 	t.Setenv("AGENT_TEMPERATURE", "")
@@ -43,6 +44,9 @@ func TestLoadAgentBriefingDefaults(t *testing.T) {
 	}
 	if cfg.AgentBriefingTZ != defaultAgentBriefingTZ {
 		t.Fatalf("AgentBriefingTZ = %q, want %q", cfg.AgentBriefingTZ, defaultAgentBriefingTZ)
+	}
+	if cfg.AgentBriefingCooldown != 30*time.Minute {
+		t.Fatalf("AgentBriefingCooldown = %v, want 30m", cfg.AgentBriefingCooldown)
 	}
 	if cfg.AgentModel != defaultAgentModel {
 		t.Fatalf("AgentModel = %q, want %q", cfg.AgentModel, defaultAgentModel)
@@ -111,6 +115,7 @@ func TestLoadAgentBriefingOverridesAndClamps(t *testing.T) {
 	t.Setenv("AGENT_BRIEFING_SCHEDULER_ENABLED", "true")
 	t.Setenv("AGENT_BRIEFING_CRON", "0 9 * * 1-5")
 	t.Setenv("AGENT_BRIEFING_TZ", "UTC")
+	t.Setenv("AGENT_BRIEFING_COOLDOWN_MINUTES", "-5")
 	t.Setenv("AGENT_MODEL", "claude-opus-4-7")
 	t.Setenv("AGENT_MAX_TOKENS", "128")
 	t.Setenv("AGENT_TEMPERATURE", "9")
@@ -140,6 +145,9 @@ func TestLoadAgentBriefingOverridesAndClamps(t *testing.T) {
 	}
 	if cfg.AgentBriefingTZ != "UTC" {
 		t.Fatalf("AgentBriefingTZ = %q, want %q", cfg.AgentBriefingTZ, "UTC")
+	}
+	if cfg.AgentBriefingCooldown != 0 {
+		t.Fatalf("AgentBriefingCooldown = %v, want 0", cfg.AgentBriefingCooldown)
 	}
 	if cfg.AgentModel != "claude-opus-4-7" {
 		t.Fatalf("AgentModel = %q, want %q", cfg.AgentModel, "claude-opus-4-7")

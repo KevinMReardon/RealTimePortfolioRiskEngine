@@ -30,20 +30,22 @@ type AgentStore interface {
 	CompleteAgentSessionSuccess(ctx context.Context, session events.AgentSession) error
 	CompleteAgentSessionFailure(ctx context.Context, session events.AgentSession) error
 	GetLatestAgentSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (events.AgentSession, bool, error)
+	GetLatestSucceededScheduledSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID) (events.AgentSession, bool, error)
+	GetActiveScheduledSessionForPortfolio(ctx context.Context, portfolioID uuid.UUID, staleAfter time.Duration) (events.AgentSession, bool, error)
 	ListAgentSessionsForPortfolio(ctx context.Context, portfolioID uuid.UUID, filter events.AgentSessionListFilter) ([]events.AgentSession, error)
 	GetAgentSessionReplayByID(ctx context.Context, sessionID uuid.UUID) (events.AgentSessionReplay, bool, error)
 }
 
 // BriefingOutput is the validated output contract persisted/replayed by the system.
 type BriefingOutput struct {
-	MarketSummary  string         `json:"market_summary"`
-	PortfolioContext string       `json:"portfolio_context"`
-	TradeIdeas     []BriefingIdea `json:"trade_ideas"`
-	RisksAndCaveats string        `json:"risks_and_caveats"`
-	DataGaps       []string       `json:"data_gaps"`
-	Disclaimer     string         `json:"disclaimer"`
-	UsedSources    []string       `json:"used_sources"`
-	UsedFields     []string       `json:"used_fields"`
+	MarketSummary    string         `json:"market_summary"`
+	PortfolioContext string         `json:"portfolio_context"`
+	TradeIdeas       []BriefingIdea `json:"trade_ideas"`
+	RisksAndCaveats  string         `json:"risks_and_caveats"`
+	DataGaps         []string       `json:"data_gaps"`
+	Disclaimer       string         `json:"disclaimer"`
+	UsedSources      []string       `json:"used_sources"`
+	UsedFields       []string       `json:"used_fields"`
 }
 
 type BriefingIdea struct {

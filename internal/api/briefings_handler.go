@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -26,8 +27,8 @@ type briefingCreateRequest struct {
 }
 
 type briefingCreateResponse struct {
-	SessionID string               `json:"session_id"`
-	Status    string               `json:"status"`
+	SessionID string                `json:"session_id"`
+	Status    string                `json:"status"`
 	Output    *agent.BriefingOutput `json:"output,omitempty"`
 }
 
@@ -100,6 +101,10 @@ func postBriefingHandler(
 		if userInput == nil {
 			userInput = map[string]any{}
 		}
+		if reqBody.Scheduled {
+			userInput["requested_scheduled"] = true
+			userInput["requested_scheduled_note"] = "API-requested briefing; cron scheduler remains the only scheduled trigger source."
+		}
 		userInputRaw, err := jsonMarshal(userInput)
 		if err != nil {
 			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "user_input must be valid JSON object", nil)
@@ -138,11 +143,12 @@ func postBriefingHandler(
 			v := effectiveTemperature
 			req.Temperature = &v
 		}
+		runCtx := context.WithoutCancel(c.Request.Context())
 		var result agent.RunBriefingResult
 		if reqBody.Scheduled {
-			result, err = svc.CreateBriefingScheduled(c.Request.Context(), req)
+			result, err = svc.CreateBriefingOnDemand(runCtx, req)
 		} else {
-			result, err = svc.CreateBriefingOnDemand(c.Request.Context(), req)
+			result, err = svc.CreateBriefingOnDemand(runCtx, req)
 		}
 		if err != nil {
 			var valErr *agent.ValidationError
@@ -150,6 +156,10 @@ func postBriefingHandler(
 				respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "briefing output failed validation", map[string]any{
 					"issues": valErr.Issues,
 				})
+				return
+			}
+			if agent.IsBriefingRateLimited(err) {
+				respondAPIError(c, http.StatusTooManyRequests, "RATE_LIMITED", "briefing provider rate limit; retry later", nil)
 				return
 			}
 			msg := strings.ToLower(err.Error())

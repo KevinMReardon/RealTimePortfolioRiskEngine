@@ -7,30 +7,35 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals/submit"
 )
 
-// PaperAutoRetryConfig controls periodic retry of recent proposals.
+// PaperAutoRetryConfig controls periodic retry of proposals from the latest succeeded briefing.
 type PaperAutoRetryConfig struct {
 	Enabled    bool
 	Interval   time.Duration
-	Lookback   time.Duration
 	MaxPerTick int
+	MaxRetries int
 }
 
-// PaperAutoRetryRunner revisits recent proposed/approved rows and attempts submit again
-// when market conditions have changed (for example market-hours reopen).
+// PaperAutoRetryRunner revisits proposed/approved rows tied to the latest succeeded session.
 type PaperAutoRetryRunner struct {
 	Config  PaperAutoRetryConfig
 	Auto    *PaperAutoRunner
+	Gate    PaperAutoBriefingGate
 	Catalog BriefingEligibilityLister
 	Log     *zap.Logger
 }
 
+func (r *PaperAutoRetryRunner) maxRetries() int {
+	if r == nil || r.Config.MaxRetries <= 0 {
+		return defaultPaperAutoMaxRetries
+	}
+	return r.Config.MaxRetries
+}
+
 func (r *PaperAutoRetryRunner) Run(ctx context.Context) {
-	if r == nil || !r.Config.Enabled || r.Auto == nil || r.Catalog == nil {
+	if r == nil || !r.Config.Enabled || r.Auto == nil || r.Catalog == nil || r.Gate == nil {
 		return
 	}
 	log := r.Log
@@ -43,7 +48,6 @@ func (r *PaperAutoRetryRunner) Run(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	r.tick(ctx, log)
 	for {
 		select {
 		case <-ctx.Done():
@@ -55,9 +59,6 @@ func (r *PaperAutoRetryRunner) Run(ctx context.Context) {
 }
 
 func (r *PaperAutoRetryRunner) tick(ctx context.Context, log *zap.Logger) {
-	if !policy.IsUSRegularSessionEquities(time.Now()) {
-		return
-	}
 	rows, err := r.Catalog.ListAgentBriefingEligiblePortfolios(ctx)
 	if err != nil {
 		log.Warn("paper_auto_retry_list_targets_failed", zap.Error(err))
@@ -76,56 +77,72 @@ func (r *PaperAutoRetryRunner) retryPortfolio(ctx context.Context, log *zap.Logg
 	if auto == nil || auto.Store == nil || auto.Keys == nil {
 		return
 	}
-	keys, linked, err := auto.Keys.LoadPortfolioAlpacaKeyMaterial(ctx, portfolioID)
-	if err != nil || !linked || !submit.IsPaperLinked(keys) {
+	active, err := r.Gate.PortfolioHasActiveBriefing(ctx, portfolioID)
+	if err != nil {
+		log.Warn("paper_auto_retry_active_check_failed",
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.Error(err),
+		)
 		return
 	}
-	lookback := r.Config.Lookback
-	if lookback <= 0 {
-		lookback = 24 * time.Hour
+	if active {
+		log.Debug("paper_auto_retry_paused",
+			zap.String("reason", "briefing_in_flight"),
+			zap.String("portfolio_id", portfolioID.String()),
+		)
+		return
+	}
+	session, ok, err := r.Gate.GetLatestSucceededAgentSessionForPortfolio(ctx, portfolioID)
+	if err != nil {
+		log.Warn("paper_auto_retry_session_lookup_failed",
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.Error(err),
+		)
+		return
+	}
+	if !ok {
+		return
+	}
+	if !auto.paperKeysReady(ctx, log, portfolioID) {
+		return
+	}
+	list, err := auto.Store.ListByAgentSession(ctx, portfolioID, session.SessionID, proposals.ListByAgentSessionFilter{})
+	if err != nil {
+		log.Warn("paper_auto_retry_list_session_failed",
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.String("session_id", session.SessionID.String()),
+			zap.Error(err),
+		)
+		return
 	}
 	max := r.Config.MaxPerTick
 	if max <= 0 {
 		max = 10
 	}
-	since := time.Now().UTC().Add(-lookback)
-	submitted := 0
-	for _, status := range []string{"proposed", "approved"} {
-		if submitted >= max || ctx.Err() != nil {
+	processed := 0
+	for _, prop := range list {
+		if processed >= max || ctx.Err() != nil {
 			return
 		}
-		st := status
-		list, err := auto.Store.ListByPortfolio(ctx, portfolioID, proposals.ListFilter{Status: &st})
-		if err != nil {
-			log.Warn("paper_auto_retry_list_failed",
-				zap.String("portfolio_id", portfolioID.String()),
-				zap.String("status", status),
-				zap.Error(err),
-			)
+		if isPaperAutoTerminalStatus(prop.Status) {
 			continue
 		}
-		for _, prop := range list {
-			if submitted >= max || ctx.Err() != nil {
-				return
+		if prop.PaperAutoRetryCount >= r.maxRetries() {
+			continue
+		}
+		switch prop.Status {
+		case proposals.StatusProposed:
+			if auto.processOneRetry(ctx, log, portfolioID, prop.ProposalID) {
+				processed++
+			} else {
+				// Count toward per-tick cap even on failure to avoid hammering one row.
+				processed++
 			}
-			if prop.CreatedAt.Before(since) {
-				continue
-			}
-			switch status {
-			case "proposed":
-				if auto.processOneWithOptions(ctx, log, portfolioID, prop.ProposalID, true) {
-					submitted++
-				}
-			case "approved":
-				res := submit.FromProposal(ctx, auto.Submit, prop, submit.Options{})
-				if res.Outcome == submit.OutcomeSuccess {
-					submitted++
-					log.Info("paper_auto_retry_submitted",
-						zap.String("portfolio_id", portfolioID.String()),
-						zap.String("proposal_id", prop.ProposalID.String()),
-						zap.String("broker_order_id", res.BrokerOrderID),
-					)
-				}
+		case proposals.StatusApproved:
+			if auto.retrySubmitApproved(ctx, log, portfolioID, prop) {
+				processed++
+			} else {
+				processed++
 			}
 		}
 	}

@@ -37,6 +37,18 @@ func (s *paperAutoStore) ListByPortfolio(ctx context.Context, portfolioID uuid.U
 	return nil, nil
 }
 
+func (s *paperAutoStore) ListByAgentSession(ctx context.Context, portfolioID, sessionID uuid.UUID, filter proposals.ListByAgentSessionFilter) ([]proposals.Proposal, error) {
+	return nil, nil
+}
+
+func (s *paperAutoStore) RecordPaperAutoRetryFailure(ctx context.Context, portfolioID, proposalID uuid.UUID, maxAttempts int, lastError string) (proposals.Proposal, error) {
+	s.prop.PaperAutoRetryCount++
+	if s.prop.PaperAutoRetryCount >= maxAttempts {
+		s.prop.Status = proposals.StatusAutoAbandoned
+	}
+	return s.prop, nil
+}
+
 type stubPaperKeys struct {
 	material events.PortfolioAlpacaKeyMaterial
 	linked   bool

@@ -31,13 +31,14 @@ const briefingSystemPrompt = "" +
 	"- get_technical_indicators(symbol): SMA20/50/200, RSI14, momentum, volatility, trend label. Prefer trades aligned with trend; treat RSI > 70 as overbought / RSI < 30 as oversold.\n" +
 	"- get_daily_bars(symbol, limit): raw OHLCV bars when you need to inspect specific price action.\n" +
 	"- get_market_news(symbols, limit): recent headlines that may explain a move or invalidate a thesis.\n" +
-	"- get_buying_power(portfolio_id): current cash you can deploy; never size a notional_usd order above this number."
+	"- get_buying_power(portfolio_id): current cash you can deploy; never size a notional_usd order above this number.\n" +
+	"When POLICY_LIMITS appears in the user message, treat it as hard caps: each notional_usd must be <= max_order_notional_usd when set, and <= daily_notional_remaining_usd when set (also respect buying power)."
 
 func BuildBriefingUserPrompt(portfolioContext json.RawMessage, userInput json.RawMessage) string {
-	return BuildBriefingUserPromptFromContext(portfolioContext, nil, nil, userInput)
+	return BuildBriefingUserPromptFromContext(portfolioContext, nil, nil, nil, userInput)
 }
 
-func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolContext, userInput json.RawMessage) string {
+func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolContext, policyLimits, userInput json.RawMessage) string {
 	portfolio := strings.TrimSpace(string(portfolioContext))
 	if portfolio == "" {
 		portfolio = "{}"
@@ -50,12 +51,16 @@ func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolConte
 	if tools == "" {
 		tools = "{}"
 	}
+	policyLim := strings.TrimSpace(string(policyLimits))
+	if policyLim == "" {
+		policyLim = "{}"
+	}
 	input := strings.TrimSpace(string(userInput))
 	if input == "" {
 		input = "{}"
 	}
 	return fmt.Sprintf(
-		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nWATCHLIST_MARKET_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nINSTRUCTIONS:\n"+
+		"BRIEFING_REQUEST:\n%s\n\nPORTFOLIO_CONTEXT:\n%s\n\nWATCHLIST_MARKET_CONTEXT:\n%s\n\nRISK_CONTEXT:\n%s\n\nPOLICY_LIMITS:\n%s\n\nINSTRUCTIONS:\n"+
 			"- Propose only; do not claim execution.\n"+
 			"- WATCHLIST_MARKET_CONTEXT lists the full tracked universe with prices; scan ALL symbols, not only held positions.\n"+
 			"- Include trade ideas for new symbols (held=false) when supported by data; include holds, trims, and exits for held symbols.\n"+
@@ -64,14 +69,40 @@ func BuildBriefingUserPromptFromContext(portfolioContext, riskContext, toolConte
 			"- trade_ideas: always an array; each actionable idea needs rationale, size, stop, target, and confidence in [0,1].\n"+
 			"- Narrative-only ideas: omit quantity, notional_usd, order_type, time_in_force, limit_price.\n"+
 			"- Executable ideas: symbol, side (BUY or SELL), quantity XOR notional_usd, plus order_type/time_in_force as needed; limit_price when required for the order type.\n"+
-			"- If using notional_usd, use at least 1.00 USD (broker minimum).",
+			"- If using notional_usd, use at least 1.00 USD (broker minimum).\n"+
+			"- When POLICY_LIMITS sets caps, keep every executable idea's notional_usd within those caps.",
 		input,
 		portfolio,
 		tools,
 		risk,
+		policyLim,
 	)
 }
 
 func BriefingSystemPrompt() string {
 	return briefingSystemPrompt
+}
+
+func BuildValidationRepairPrompt(invalidOutput string, issues []ValidationIssue) string {
+	invalid := strings.TrimSpace(invalidOutput)
+	if invalid == "" {
+		invalid = "{}"
+	}
+	issuesJSON, err := json.Marshal(issues)
+	if err != nil {
+		issuesJSON = []byte("[]")
+	}
+	return fmt.Sprintf(
+		"You are fixing a prior invalid briefing JSON payload.\n"+
+			"Return ONLY valid JSON for the briefing schema with these exact top-level keys:\n"+
+			"market_summary, portfolio_context, trade_ideas, risks_and_caveats, data_gaps, disclaimer, used_sources, used_fields.\n"+
+			"Do not include markdown or code fences.\n"+
+			"Keep existing content where possible, but fix every validation issue listed.\n"+
+			"Actionable trade ideas must include symbol, side (BUY or SELL), and quantity or notional_usd when structured order fields are present.\n"+
+			"Narrative-only ideas must omit structured order fields entirely.\n\n"+
+			"VALIDATION_ISSUES:\n%s\n\n"+
+			"INVALID_OUTPUT:\n%s",
+		string(issuesJSON),
+		invalid,
+	)
 }

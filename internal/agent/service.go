@@ -20,18 +20,20 @@ import (
 
 // Service is the default AgentService implementation.
 type Service struct {
-	store        AgentStore
-	client       AnthropicClient
-	toolExecutor ToolExecutor
-	provider     string
-	model        string
-	log          *zap.Logger
-	sessionTimeout time.Duration
-	materializer   ProposalMaterializer
-	paperAutoMu    sync.RWMutex
-	paperAuto      *PaperAutoRunner
-	maxTurns       int
-	maxToolCalls   int
+	store             AgentStore
+	client            AnthropicClient
+	toolExecutor      ToolExecutor
+	provider          string
+	model             string
+	log               *zap.Logger
+	sessionTimeout    time.Duration
+	materializer      ProposalMaterializer
+	paperAutoMu       sync.RWMutex
+	paperAuto         *PaperAutoRunner
+	maxTurns          int
+	maxToolCalls      int
+	cooldownMu        sync.RWMutex
+	scheduledCooldown time.Duration
 }
 
 // SetPaperAuto swaps the post-briefing autonomous submit runner (nil disables).
@@ -51,6 +53,31 @@ func (s *Service) paperAutoRunner() *PaperAutoRunner {
 	s.paperAutoMu.RLock()
 	defer s.paperAutoMu.RUnlock()
 	return s.paperAuto
+}
+
+// SetScheduledCooldown updates scheduled briefing cooldown. Zero disables cooldown.
+func (s *Service) SetScheduledCooldown(d time.Duration) {
+	if s == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	s.cooldownMu.Lock()
+	s.scheduledCooldown = d
+	s.cooldownMu.Unlock()
+}
+
+func (s *Service) scheduledCooldownDuration() time.Duration {
+	if s == nil {
+		return 0
+	}
+	s.cooldownMu.RLock()
+	defer s.cooldownMu.RUnlock()
+	if s.scheduledCooldown < 0 {
+		return 0
+	}
+	return s.scheduledCooldown
 }
 
 // WithLimits sets the per-session turn and tool-call caps from config.
@@ -170,10 +197,11 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 		}
 		if found {
 			observability.ObserveAgentSessionOutcome("deduped", trigger)
-			s.log.Warn("agent_session_skip_in_progress",
+			s.log.Info("agent_session_skip_in_progress",
 				zap.String("active_session_id", existing.SessionID.String()),
 				zap.String("portfolio_id", req.PortfolioID.String()),
 				zap.String("trigger_source", trigger),
+				zap.String("skip_reason", "overlap"),
 				zap.String("active_status", existing.Status),
 			)
 			out := BriefingOutput{}
@@ -184,6 +212,39 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 				Session: existing,
 				Output:  out,
 			}, nil
+		}
+		cooldown := s.scheduledCooldownDuration()
+		if cooldown > 0 {
+			latestOK, found, err := s.store.GetLatestSucceededScheduledSessionForPortfolio(ctx, req.PortfolioID)
+			if err != nil {
+				return RunBriefingResult{}, fmt.Errorf("check scheduled cooldown: %w", err)
+			}
+			if found {
+				lastCompletedAt := latestOK.CreatedAt
+				if latestOK.CompletedAt != nil && !latestOK.CompletedAt.IsZero() {
+					lastCompletedAt = *latestOK.CompletedAt
+				}
+				nextEligibleAt := lastCompletedAt.Add(cooldown)
+				if now := time.Now().UTC(); now.Before(nextEligibleAt) {
+					observability.ObserveAgentSessionOutcome("deduped", trigger)
+					s.log.Info("agent_session_skip_cooldown",
+						zap.String("portfolio_id", req.PortfolioID.String()),
+						zap.String("trigger_source", trigger),
+						zap.String("skip_reason", "cooldown"),
+						zap.Int("cooldown_minutes", int(cooldown/time.Minute)),
+						zap.Time("last_success_completed_at", lastCompletedAt),
+						zap.Time("next_eligible_at", nextEligibleAt),
+					)
+					out := BriefingOutput{}
+					if len(latestOK.ResponseValidated) > 0 {
+						_ = json.Unmarshal(latestOK.ResponseValidated, &out)
+					}
+					return RunBriefingResult{
+						Session: latestOK,
+						Output:  out,
+					}, nil
+				}
+			}
 		}
 	}
 	var tempDec *decimal.Decimal
@@ -279,7 +340,8 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 	}
 	systemPrompt := BriefingSystemPrompt()
 	portfolioCtx, marketCtx := s.bootstrapBriefingContext(ctx, req.PortfolioID)
-	userPrompt := BuildBriefingUserPromptFromContext(portfolioCtx, nil, marketCtx, effectiveUserInput)
+	policyLimits := s.briefingPolicyLimits(ctx, req.PortfolioID)
+	userPrompt := BuildBriefingUserPromptFromContext(portfolioCtx, nil, marketCtx, policyLimits, effectiveUserInput)
 	if len(marketCtx) > 2 {
 		s.log.Info("briefing_bootstrap_loaded",
 			zap.String("portfolio_id", req.PortfolioID.String()),
@@ -319,11 +381,17 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 			Tools:       AnthropicToolCatalog(),
 		})
 		if err != nil {
+			failStatus := "failed"
+			failCode := "PROVIDER_ERROR"
+			if isAnthropicRateLimit(err) {
+				failStatus = "rate_limited"
+				failCode = "RATE_LIMITED"
+			}
 			failErr := s.completeFailureWithPersistenceContext(events.AgentSession{
 				SessionID:         sessionID,
-				Status:            "failed",
+				Status:            failStatus,
 				ToolCallCount:     totalToolCalls,
-				ErrorCode:         strPtr("PROVIDER_ERROR"),
+				ErrorCode:         strPtr(failCode),
 				ErrorMessage:      strPtr(err.Error()),
 				CompletedAt:       timePtr(time.Now().UTC()),
 				ResponseRaw:       nil,
@@ -333,12 +401,12 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 				return RunBriefingResult{}, fmt.Errorf("agent provider error: %w (plus complete failure error: %v)", err, failErr)
 			}
 			terminalPersisted = true
-			observability.ObserveAgentSessionOutcome("failed", trigger)
+			observability.ObserveAgentSessionOutcome(failStatus, trigger)
 			s.log.Warn("agent_session_failed",
 				zap.String("session_id", sessionID.String()),
 				zap.String("portfolio_id", req.PortfolioID.String()),
 				zap.String("trigger_source", trigger),
-				zap.String("status", "failed"),
+				zap.String("status", failStatus),
 				zap.String("error", err.Error()),
 			)
 			return RunBriefingResult{}, fmt.Errorf("agent provider call: %w", err)
@@ -528,37 +596,52 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 
 	validated, valErr := ValidateBriefingOutput(json.RawMessage(lastResp.OutputText))
 	if valErr != nil {
-		errText := valErr.Error()
-		validationJSON, _ := json.Marshal(validationIssuesFromError(valErr))
-		if err := s.completeFailureWithPersistenceContext(events.AgentSession{
-			SessionID:        sessionID,
-			Status:           "invalid_output",
-			ToolCallCount:    totalToolCalls,
-			ErrorCode:        strPtr("VALIDATION_FAILED"),
-			ErrorMessage:     &errText,
-			ResponseRaw:      redactJSON(lastResp.Raw),
-			ValidationErrors: redactJSON(validationJSON),
-			CompletedAt:      timePtr(time.Now().UTC()),
-		}); err != nil {
-			s.log.Warn("agent_session_invalid_output_persist_failed",
+		repairedResp, repairedOut, repaired, repairErr := s.tryRepairInvalidBriefingOutput(
+			runCtx,
+			modelName,
+			maxTokens,
+			lastResp,
+			validationIssuesFromError(valErr),
+		)
+		if repaired {
+			lastResp = repairedResp
+			validated = repairedOut
+		} else {
+			errText := valErr.Error()
+			if repairErr != nil {
+				errText = fmt.Sprintf("%s (repair_attempt_failed: %v)", errText, repairErr)
+			}
+			validationJSON, _ := json.Marshal(validationIssuesFromError(valErr))
+			if err := s.completeFailureWithPersistenceContext(events.AgentSession{
+				SessionID:        sessionID,
+				Status:           "invalid_output",
+				ToolCallCount:    totalToolCalls,
+				ErrorCode:        strPtr("VALIDATION_FAILED"),
+				ErrorMessage:     &errText,
+				ResponseRaw:      redactJSON(lastResp.Raw),
+				ValidationErrors: redactJSON(validationJSON),
+				CompletedAt:      timePtr(time.Now().UTC()),
+			}); err != nil {
+				s.log.Warn("agent_session_invalid_output_persist_failed",
+					zap.String("session_id", sessionID.String()),
+					zap.String("portfolio_id", req.PortfolioID.String()),
+					zap.Error(err),
+				)
+				observability.IncAgentValidationFailure()
+				// Always return the validation error for API mapping (422); DB row may be finalized by defer.
+				return RunBriefingResult{}, fmt.Errorf("agent output validation failed: %w", valErr)
+			}
+			terminalPersisted = true
+			observability.ObserveAgentSessionOutcome("invalid_output", trigger)
+			observability.IncAgentValidationFailure()
+			s.log.Warn("agent_session_failed",
 				zap.String("session_id", sessionID.String()),
 				zap.String("portfolio_id", req.PortfolioID.String()),
-				zap.Error(err),
+				zap.String("trigger_source", trigger),
+				zap.String("status", "invalid_output"),
 			)
-			observability.IncAgentValidationFailure()
-			// Always return the validation error for API mapping (422); DB row may be finalized by defer.
 			return RunBriefingResult{}, fmt.Errorf("agent output validation failed: %w", valErr)
 		}
-		terminalPersisted = true
-		observability.ObserveAgentSessionOutcome("invalid_output", trigger)
-		observability.IncAgentValidationFailure()
-		s.log.Warn("agent_session_failed",
-			zap.String("session_id", sessionID.String()),
-			zap.String("portfolio_id", req.PortfolioID.String()),
-			zap.String("trigger_source", trigger),
-			zap.String("status", "invalid_output"),
-		)
-		return RunBriefingResult{}, fmt.Errorf("agent output validation failed: %w", valErr)
 	}
 	validated = applyTradeIdeaDefaults(validated, effectiveUserInput)
 
@@ -607,6 +690,36 @@ func (s *Service) runBriefing(ctx context.Context, req RunBriefingRequest, enfor
 	session.OutputTokens = lastResp.OutputTokens
 	session.EstimatedCostUSD = estimatedCost
 	return RunBriefingResult{Session: session, Output: validated}, nil
+}
+
+func (s *Service) tryRepairInvalidBriefingOutput(
+	runCtx context.Context,
+	modelName string,
+	maxTokens *int,
+	lastResp AnthropicMessageResponse,
+	issues []ValidationIssue,
+) (AnthropicMessageResponse, BriefingOutput, bool, error) {
+	repairPrompt := BuildValidationRepairPrompt(lastResp.OutputText, issues)
+	resp, err := s.client.CreateMessage(runCtx, AnthropicMessageRequest{
+		Model:     modelName,
+		System:    BriefingSystemPrompt(),
+		MaxTokens: maxTokens,
+		Messages: []AnthropicMessage{{
+			Role: "user",
+			Content: []AnthropicContentBlock{{
+				Type: "text",
+				Text: repairPrompt,
+			}},
+		}},
+	})
+	if err != nil {
+		return AnthropicMessageResponse{}, BriefingOutput{}, false, err
+	}
+	repaired, valErr := ValidateBriefingOutput(json.RawMessage(resp.OutputText))
+	if valErr != nil {
+		return AnthropicMessageResponse{}, BriefingOutput{}, false, valErr
+	}
+	return resp, repaired, true, nil
 }
 
 func (s *Service) completeFailureWithPersistenceContext(session events.AgentSession) error {
@@ -711,6 +824,16 @@ func toolResultContentAsJSONString(raw json.RawMessage) json.RawMessage {
 
 func nullableStr(v string) *string {
 	return strPtr(v)
+}
+
+func (s *Service) briefingPolicyLimits(ctx context.Context, portfolioID uuid.UUID) json.RawMessage {
+	if s == nil {
+		return nil
+	}
+	if m, ok := s.materializer.(*BriefingProposalMaterializer); ok {
+		return m.PolicyLimitsForPortfolio(ctx, portfolioID)
+	}
+	return nil
 }
 
 func (s *Service) bootstrapBriefingContext(ctx context.Context, portfolioID uuid.UUID) (portfolioCtx, marketCtx json.RawMessage) {
@@ -874,46 +997,36 @@ func isUnknownLike(v string) bool {
 // Only scheduled-trigger sessions can suppress a new scheduled tick; in-flight manual
 // briefings do NOT block scheduled runs.
 func (s *Service) findActiveScheduledSession(ctx context.Context, portfolioID uuid.UUID, now time.Time) (events.AgentSession, bool, error) {
-	list, err := s.store.ListAgentSessionsForPortfolio(ctx, portfolioID, events.AgentSessionListFilter{
-		Limit:  50,
-		Offset: 0,
-	})
-	if err != nil {
-		return events.AgentSession{}, false, err
-	}
 	// Anything older than 2x the session timeout is almost certainly a crash leftover.
+	// Briefings can run much longer than AgentSessionTimeout when limits are high, so never
+	// treat an in-flight scheduled session as stale before 90 minutes.
 	staleAfter := s.sessionTimeout * 2
-	if staleAfter < 10*time.Minute {
-		staleAfter = 10 * time.Minute
+	if staleAfter < 90*time.Minute {
+		staleAfter = 90 * time.Minute
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	cutoff := now.Add(-staleAfter)
-	for _, item := range list {
-		st := strings.TrimSpace(item.Status)
-		if st != "queued" && st != "running" {
-			continue
-		}
-		if strings.TrimSpace(item.TriggerSource) != "scheduled" {
-			continue
-		}
-		started := item.CreatedAt
-		if item.StartedAt != nil && !item.StartedAt.IsZero() {
-			started = *item.StartedAt
-		}
-		if started.Before(cutoff) {
-			// Stale row from a previous crash; do not let it block new scheduled ticks.
-			s.log.Warn("agent_session_stale_active_ignored",
-				zap.String("session_id", item.SessionID.String()),
-				zap.String("portfolio_id", portfolioID.String()),
-				zap.String("status", st),
-				zap.Time("created_at", item.CreatedAt),
-				zap.Time("cutoff", cutoff),
-			)
-			continue
-		}
-		return item, true, nil
+	item, found, err := s.store.GetActiveScheduledSessionForPortfolio(ctx, portfolioID, staleAfter)
+	if err != nil {
+		return events.AgentSession{}, false, err
 	}
-	return events.AgentSession{}, false, nil
+	if !found {
+		return events.AgentSession{}, false, nil
+	}
+	started := item.CreatedAt
+	if item.StartedAt != nil && !item.StartedAt.IsZero() {
+		started = *item.StartedAt
+	}
+	if started.Before(now.Add(-staleAfter)) {
+		s.log.Warn("agent_session_stale_active_ignored",
+			zap.String("session_id", item.SessionID.String()),
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.String("status", item.Status),
+			zap.Time("created_at", item.CreatedAt),
+			zap.Duration("stale_after", staleAfter),
+		)
+		return events.AgentSession{}, false, nil
+	}
+	return item, true, nil
 }

@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS uq_agent_sessions_daily_portfolio_scheduled;

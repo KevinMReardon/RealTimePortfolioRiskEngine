@@ -8,6 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 )
 
@@ -27,6 +29,7 @@ type proposalJSON struct {
 	PayloadHash       string          `json:"payload_hash"`
 	PolicyInputsHash  string          `json:"policy_inputs_hash"`
 	PolicyConfigHash  string          `json:"policy_config_hash"`
+	PolicyResult      json.RawMessage `json:"policy_result,omitempty"`
 	RationaleSnapshot *string         `json:"rationale_snapshot,omitempty"`
 	CriticVerdict     json.RawMessage `json:"critic_verdict,omitempty"`
 	CriticCompletedAt *string         `json:"critic_completed_at,omitempty"`
@@ -56,6 +59,7 @@ func proposalToJSON(p proposals.Proposal) proposalJSON {
 		PayloadHash:       p.PayloadHash,
 		PolicyInputsHash:  p.PolicyInputsHash,
 		PolicyConfigHash:  p.PolicyConfigHash,
+		PolicyResult:      append(json.RawMessage(nil), p.PolicyResult...),
 		RationaleSnapshot: p.RationaleSnapshot,
 	}
 	if p.AgentSessionID != nil {
@@ -98,7 +102,7 @@ func getProposalsHandler(store *proposals.Store, readStore PortfolioReadStore, p
 	}
 }
 
-func postProposalApproveHandler(store *proposals.Store, readStore PortfolioReadStore, priceStreamPartitions []uuid.UUID) gin.HandlerFunc {
+func postProposalApproveHandler(store *proposals.Store, readStore PortfolioReadStore, priceStreamPartitions []uuid.UUID, runtimeCfg *config.ConfigHolder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		pid, ok := ensurePortfolioAccess(c, readStore, priceStreamPartitions)
 		if !ok {
@@ -122,6 +126,30 @@ func postProposalApproveHandler(store *proposals.Store, readStore PortfolioReadS
 		if err := c.ShouldBindJSON(&body); err != nil {
 			respondAPIError(c, http.StatusBadRequest, ErrCodeValidation, "invalid request body including JSON shape", nil)
 			return
+		}
+		if runtimeCfg != nil {
+			cfg := runtimeCfg.Get()
+			if cfg.PolicyMode == policy.ModeEnforce {
+				prop, err := store.GetByIDForPortfolio(c.Request.Context(), pid, propID)
+				if err != nil {
+					if err == proposals.ErrProposalNotFound {
+						respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, "proposal not found", nil)
+						return
+					}
+					respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "internal error", nil)
+					return
+				}
+				var rec proposals.PolicyResultRecord
+				if err := json.Unmarshal(prop.PolicyResult, &rec); err == nil &&
+					rec.EffectiveOutcome == policy.OutcomeDeny &&
+					policy.HumanApprovalBlocked(rec.Violations) {
+					respondAPIError(c, http.StatusUnprocessableEntity, ErrCodeValidation, "cannot approve proposal: operational policy block", map[string]any{
+						"effective_outcome": string(rec.EffectiveOutcome),
+						"violations":        rec.Violations,
+					})
+					return
+				}
+			}
 		}
 		err = store.ApproveProposal(c.Request.Context(), proposals.ApproveParams{
 			PortfolioID: pid,

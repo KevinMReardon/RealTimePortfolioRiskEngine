@@ -210,15 +210,10 @@ func evaluateCore(intent Intent, snap Snapshot, cfg Config) Decision {
 		}
 	}
 
-	// 7. Market hours (US equities regular session; weekends fail-closed)
-	if !IsUSRegularSessionEquities(snap.NowNY) {
-		out.Violations = append(out.Violations, Violation{
-			Code:   RuleMarketHours,
-			Detail: "outside US regular equity session (America/New_York, Mon–Fri 09:30–16:00)",
-		})
-	}
+	// Market hours: not enforced at proposal evaluate time. Alpaca accepts extended-hours /
+	// queued orders where configured; human approve and broker submit use EvaluateForBrokerSubmit.
 
-	// 8. PDT / blocks (Alpaca-shaped snapshot when present)
+	// 7. PDT / blocks (Alpaca-shaped snapshot when present)
 	if snap.OptionalBroker != nil {
 		if snap.OptionalBroker.TradingBlocked {
 			out.Violations = append(out.Violations, Violation{

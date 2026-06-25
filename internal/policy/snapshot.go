@@ -15,16 +15,25 @@ func BuildSnapshot(in portfolio.PortfolioAssemblerInput, equityAnchor decimal.De
 	marks := make(map[string]decimal.Decimal)
 	totalMV := decimal.Zero
 
+	for sym, pm := range in.PriceBySymbol {
+		s := strings.TrimSpace(sym)
+		if s == "" || pm.Price.IsZero() {
+			continue
+		}
+		// Include all known prices, not just currently-held symbols. This avoids false
+		// policy denials for new-symbol notional ideas that need mark-derived quantity.
+		marks[s] = pm.Price
+	}
+
 	for _, p := range in.Positions {
 		sym := strings.TrimSpace(p.Symbol)
 		if sym == "" {
 			continue
 		}
 		posQty[sym] = p.Quantity
-		if pm, ok := in.PriceBySymbol[sym]; ok && !pm.Price.IsZero() {
-			marks[sym] = pm.Price
+		if pm, ok := marks[sym]; ok {
 			if !p.Quantity.IsZero() {
-				totalMV = totalMV.Add(p.Quantity.Abs().Mul(pm.Price))
+				totalMV = totalMV.Add(p.Quantity.Abs().Mul(pm))
 			}
 		}
 	}

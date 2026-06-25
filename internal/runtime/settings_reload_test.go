@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -154,5 +155,51 @@ func TestSchedulerManager_InvalidCronDoesNotPanic(t *testing.T) {
 	defer m.mu.Unlock()
 	if m.running {
 		t.Fatalf("scheduler should not be marked running when cron parse fails")
+	}
+}
+
+func TestSchedulerManager_StatusIncludesHeartbeatAndCooldown(t *testing.T) {
+	m := newTestSchedManager(t)
+	cfg := cfgFor(true, "*/1 * * * *", "UTC")
+	m.Apply(context.Background(), cfg)
+	started := time.Now().UTC()
+	m.recordTickStart(started)
+	finished := started.Add(time.Second)
+	success := started.Add(2 * time.Second)
+	m.recordTickFinish(finished, agent.ScheduledBriefingTickResult{
+		SuccessfulSessions: 1,
+		LastSuccessAt:      &success,
+	}, 30*time.Minute)
+	status := m.Status(30 * time.Minute)
+	if !status.Enabled || !status.Running {
+		t.Fatalf("expected scheduler enabled/running: %+v", status)
+	}
+	if status.LastTickAt == nil || !status.LastTickAt.Equal(started) {
+		t.Fatalf("unexpected last tick: %+v", status.LastTickAt)
+	}
+	if status.CooldownUntil == nil || !status.CooldownUntil.Equal(success.Add(30*time.Minute)) {
+		t.Fatalf("unexpected cooldown until: %+v", status.CooldownUntil)
+	}
+}
+
+func TestSchedulerManager_WatchdogRestartsStaleScheduler(t *testing.T) {
+	m := newTestSchedManager(t)
+	cfg := cfgFor(true, "*/1 * * * *", "UTC")
+	m.Apply(context.Background(), cfg)
+	m.mu.Lock()
+	firstGen := m.startGen
+	staleNext := time.Now().UTC().Add(-5 * time.Minute)
+	m.nextTickAt = &staleNext
+	m.mu.Unlock()
+
+	m.checkWatchdog(cfg)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.startGen <= firstGen {
+		t.Fatalf("expected watchdog restart to advance start generation, got %d <= %d", m.startGen, firstGen)
+	}
+	if !m.running {
+		t.Fatalf("expected scheduler running after watchdog restart")
 	}
 }

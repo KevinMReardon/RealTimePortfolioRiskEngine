@@ -8,12 +8,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/agent"
+	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/connectors/alpaca"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/ingestion/pricefeed"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/observability"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/policy"
-	"github.com/KevinMReardon/realtime-portfolio-risk/internal/config"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/proposals"
 	"github.com/KevinMReardon/realtime-portfolio-risk/internal/runtime"
 )
@@ -93,6 +93,8 @@ type RouterConfig struct {
 	SettingsStore SettingsStore
 	// SettingsReloader reapplies DB settings after PATCH (requires SettingsStore + RuntimeConfig).
 	SettingsReloader *runtime.SettingsReloader
+	// SchedulerManager exposes scheduled briefing runtime health when configured.
+	SchedulerManager *runtime.SchedulerManager
 	// RuntimeConfig supplies effective config for settings GET and proposal submit.
 	RuntimeConfig *config.ConfigHolder
 }
@@ -202,10 +204,11 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			read.GET("/portfolios/:id/briefings/latest", getLatestBriefingHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/portfolios/:id/briefings", getBriefingsHandler(cfg.AgentService, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.GET("/agent-sessions/:session_id/replay", getBriefingReplayHandler(cfg.AgentService, cfg.ReadPortfolio))
+			read.GET("/agent-scheduler/status", getAgentSchedulerStatusHandler(cfg.SchedulerManager, cfg.RuntimeConfig))
 		}
 		if cfg.ProposalsStore != nil && cfg.AuthStore != nil {
 			read.GET("/portfolios/:id/proposals", getProposalsHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
-			read.POST("/portfolios/:id/proposals/:proposal_id/approve", postProposalApproveHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
+			read.POST("/portfolios/:id/proposals/:proposal_id/approve", postProposalApproveHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions, cfg.RuntimeConfig))
 			read.POST("/portfolios/:id/proposals/:proposal_id/deny", postProposalDenyHandler(cfg.ProposalsStore, cfg.ReadPortfolio, cfg.PriceStreamPartitions))
 			read.POST("/portfolios/:id/proposals/:proposal_id/submit", postProposalSubmitHandler(
 				cfg.ProposalsStore,

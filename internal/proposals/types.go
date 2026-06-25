@@ -60,7 +60,21 @@ type Proposal struct {
 	CriticModel *string
 	// ApprovalSource is human vs paper auto-approve; NULL for legacy rows or pre-approval.
 	ApprovalSource *string
+
+	// PaperAutoRetryCount is incremented on each failed paper-auto retry pass (not materialize-first).
+	PaperAutoRetryCount int
 }
+
+// Proposal status values for proposed_trades.status.
+const (
+	StatusProposed       = "proposed"
+	StatusApproved       = "approved"
+	StatusSubmitted      = "submitted"
+	StatusFilled         = "filled"
+	StatusRejected       = "rejected"
+	StatusCancelled      = "cancelled"
+	StatusAutoAbandoned  = "auto_abandoned"
+)
 
 // InsertParams builds a proposed_trades row after policy.Evaluate.
 type InsertParams struct {
@@ -88,6 +102,11 @@ type PolicyResultRecord struct {
 type ListFilter struct {
 	Status *string // exact status match; nil = all
 	Symbol *string // normalized match; nil = all
+}
+
+// ListByAgentSessionFilter narrows ListByAgentSession.
+type ListByAgentSessionFilter struct {
+	Statuses []string // empty = proposed and approved only
 }
 
 // ApproveParams binds human approval to payload_hash and row_version.

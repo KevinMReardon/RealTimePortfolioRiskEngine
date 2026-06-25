@@ -29,6 +29,7 @@ type fakeProvider struct {
 	name  string
 	quote pricesource.PriceQuote
 	err   error
+	delay time.Duration
 }
 
 func (p *fakeProvider) Name() string { return p.name }
@@ -36,6 +37,9 @@ func (p *fakeProvider) Health() pricesource.HealthMetadata {
 	return pricesource.HealthMetadata{Provider: p.name, Healthy: p.err == nil}
 }
 func (p *fakeProvider) FetchQuotes(_ context.Context, _ []string) (pricesource.FetchResult, error) {
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
 	if p.err != nil {
 		return pricesource.FetchResult{}, p.err
 	}
@@ -86,6 +90,41 @@ func TestRunTick_UsesFallbackProvider(t *testing.T) {
 	}
 	if got := rec.events[0].Source; got != "pricefeed:backup" {
 		t.Fatalf("source got %q want pricefeed:backup", got)
+	}
+}
+
+func TestTriggerTick_SkipsWhenPreviousTickStillRunning(t *testing.T) {
+	t.Parallel()
+	rec := &ingestRecorder{}
+	partitions := config.DerivePriceStreamPartitions(uuid.MustParse("00000000-0000-4000-8000-000000000001"), 2)
+	provider := &fakeProvider{
+		name: "twelvedata",
+		quote: pricesource.PriceQuote{
+			Symbol:         "AAPL",
+			Price:          decimal.RequireFromString("195.33"),
+			Currency:       "USD",
+			AsOf:           time.Unix(1710000000, 0).UTC(),
+			SourceSequence: 100,
+		},
+		delay: 100 * time.Millisecond,
+	}
+	runner, err := New(rec, Config{
+		Interval:              60 * time.Second,
+		Symbols:               []string{"AAPL"},
+		Providers:             []pricesource.PriceProvider{provider},
+		PriceStreamPartitions: partitions,
+		MaxRetries:            0,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runner.tickMu.Lock()
+	runner.TriggerTick(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	runner.tickMu.Unlock()
+	time.Sleep(150 * time.Millisecond)
+	if len(rec.events) != 0 {
+		t.Fatalf("expected trigger tick to skip while previous tick is running, events=%d", len(rec.events))
 	}
 }
 

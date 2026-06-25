@@ -48,6 +48,12 @@ const criticSystemPrompt = "" +
 	"Set allow=false when the trade is unclear, oversized, contradictory, or lacks sufficient rationale. " +
 	"You cannot override deterministic policy; focus on qualitative risk and coherence."
 
+const (
+	criticMaxProviderAttempts = 3
+	criticRetryBackoff        = 250 * time.Millisecond
+	criticMaxTokens           = 512
+)
+
 // Review loads the proposal, calls the model, persists the verdict, and returns the parsed result.
 func (c *Critic) Review(ctx context.Context, portfolioID, proposalID uuid.UUID) (CriticVerdict, error) {
 	if c == nil || c.Client == nil || c.Store == nil {
@@ -62,14 +68,14 @@ func (c *Critic) Review(ctx context.Context, portfolioID, proposalID uuid.UUID) 
 		return CriticVerdict{}, fmt.Errorf("critic: load proposal: %w", err)
 	}
 	userPayload, err := json.Marshal(map[string]any{
-		"proposal_id": proposalID.String(),
-		"symbol":      prop.Symbol,
-		"side":        prop.Side,
-		"quantity":    prop.Quantity,
-		"notional_usd": prop.NotionalUSD,
-		"order_type":  prop.OrderType,
+		"proposal_id":   proposalID.String(),
+		"symbol":        prop.Symbol,
+		"side":          prop.Side,
+		"quantity":      prop.Quantity,
+		"notional_usd":  prop.NotionalUSD,
+		"order_type":    prop.OrderType,
 		"time_in_force": prop.TimeInForce,
-		"rationale":   redactRationale(prop.RationaleSnapshot),
+		"rationale":     redactRationale(prop.RationaleSnapshot),
 		"policy_result": redactJSON(prop.PolicyResult),
 	})
 	if err != nil {
@@ -79,9 +85,10 @@ func (c *Critic) Review(ctx context.Context, portfolioID, proposalID uuid.UUID) 
 	if model == "" {
 		model = "claude-sonnet-4.6"
 	}
-	resp, err := c.Client.CreateMessage(ctx, AnthropicMessageRequest{
-		Model:  model,
-		System: criticSystemPrompt,
+	criticReq := AnthropicMessageRequest{
+		Model:     model,
+		System:    criticSystemPrompt,
+		MaxTokens: criticIntPtr(criticMaxTokens),
 		Messages: []AnthropicMessage{{
 			Role: "user",
 			Content: []AnthropicContentBlock{{
@@ -89,26 +96,64 @@ func (c *Critic) Review(ctx context.Context, portfolioID, proposalID uuid.UUID) 
 				Text: string(userPayload),
 			}},
 		}},
-	})
+	}
+	resp, err := c.callWithRetry(ctx, criticReq)
 	if err != nil {
-		return CriticVerdict{Allow: false, ReasonCode: "critic_provider_error", Notes: err.Error()}, nil
+		verdict := CriticVerdict{Allow: false, ReasonCode: "critic_provider_error", Notes: err.Error()}
+		if persistErr := c.persistVerdict(ctx, portfolioID, proposalID, model, verdict); persistErr != nil {
+			return verdict, fmt.Errorf("critic: persist provider-error verdict: %w", persistErr)
+		}
+		return verdict, nil
 	}
 	verdict, parseErr := parseCriticVerdict(resp.OutputText)
 	if parseErr != nil {
 		log.Warn("critic_parse_failed", zap.Error(parseErr), zap.String("proposal_id", proposalID.String()))
 		verdict = CriticVerdict{Allow: false, ReasonCode: "critic_parse_failed", Notes: parseErr.Error()}
 	}
+	if err := c.persistVerdict(ctx, portfolioID, proposalID, model, verdict); err != nil {
+		return verdict, fmt.Errorf("critic: persist verdict: %w", err)
+	}
+	return verdict, nil
+}
+
+func criticIntPtr(v int) *int { return &v }
+
+func (c *Critic) persistVerdict(ctx context.Context, portfolioID, proposalID uuid.UUID, model string, verdict CriticVerdict) error {
 	raw, _ := json.Marshal(verdict)
-	if err := c.Store.SaveCriticVerdict(ctx, proposals.SaveCriticVerdictParams{
+	return c.Store.SaveCriticVerdict(ctx, proposals.SaveCriticVerdictParams{
 		PortfolioID: portfolioID,
 		ProposalID:  proposalID,
 		Verdict:     raw,
 		CompletedAt: time.Now().UTC(),
 		Model:       model,
-	}); err != nil {
-		return verdict, fmt.Errorf("critic: persist verdict: %w", err)
+	})
+}
+
+func (c *Critic) callWithRetry(ctx context.Context, req AnthropicMessageRequest) (AnthropicMessageResponse, error) {
+	var lastErr error
+	backoff := criticRetryBackoff
+	for attempt := 1; attempt <= criticMaxProviderAttempts; attempt++ {
+		resp, err := c.Client.CreateMessage(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == criticMaxProviderAttempts {
+			break
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return AnthropicMessageResponse{}, ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
 	}
-	return verdict, nil
+	if lastErr != nil {
+		return AnthropicMessageResponse{}, fmt.Errorf("critic provider failed after retries: %w", lastErr)
+	}
+	return AnthropicMessageResponse{}, fmt.Errorf("critic provider failed")
 }
 
 func parseCriticVerdict(text string) (CriticVerdict, error) {

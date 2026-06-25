@@ -18,10 +18,11 @@ import (
 )
 
 type fakeAgentService struct {
-	onDemand func(ctx context.Context, req agent.RunBriefingRequest) (agent.RunBriefingResult, error)
-	latest   events.AgentSession
-	found    bool
-	replay   events.AgentSessionReplay
+	onDemand      func(ctx context.Context, req agent.RunBriefingRequest) (agent.RunBriefingResult, error)
+	scheduledRuns int
+	latest        events.AgentSession
+	found         bool
+	replay        events.AgentSessionReplay
 }
 
 func (f *fakeAgentService) RunBriefing(ctx context.Context, req agent.RunBriefingRequest) (agent.RunBriefingResult, error) {
@@ -34,6 +35,7 @@ func (f *fakeAgentService) CreateBriefingOnDemand(ctx context.Context, req agent
 	return agent.RunBriefingResult{}, nil
 }
 func (f *fakeAgentService) CreateBriefingScheduled(ctx context.Context, req agent.RunBriefingRequest) (agent.RunBriefingResult, error) {
+	f.scheduledRuns++
 	return f.CreateBriefingOnDemand(ctx, req)
 }
 func (f *fakeAgentService) GetLatestBriefing(context.Context, uuid.UUID) (events.AgentSession, bool, error) {
@@ -126,6 +128,62 @@ func TestBriefingsPost_ResponseContract(t *testing.T) {
 	}
 	if _, ok := output["trade_ideas"]; !ok {
 		t.Fatalf("missing trade_ideas in output: %#v", output)
+	}
+}
+
+func TestBriefingsPost_ScheduledFlagUsesManualPath(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	user := events.UserAccount{
+		UserID:       uuid.New(),
+		DisplayName:  "User",
+		WorkEmail:    "scheduled-compat@example.com",
+		PasswordHash: "hash",
+	}
+	store := newFakeAuthStore()
+	_, _ = store.CreateUser(context.Background(), user)
+	sid := uuid.New()
+	_, _ = store.CreateSession(context.Background(), events.UserSession{
+		SessionID: sid, UserID: user.UserID, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	portfolioID := uuid.New()
+	agentSvc := &fakeAgentService{
+		onDemand: func(ctx context.Context, req agent.RunBriefingRequest) (agent.RunBriefingResult, error) {
+			if req.TriggerSource == "scheduled" {
+				t.Fatalf("API scheduled=true must not use cron scheduled trigger")
+			}
+			var input map[string]any
+			if err := json.Unmarshal(req.UserInput, &input); err != nil {
+				t.Fatalf("unmarshal user input: %v", err)
+			}
+			if input["requested_scheduled"] != true {
+				t.Fatalf("expected requested_scheduled marker, got %#v", input)
+			}
+			return agent.RunBriefingResult{
+				Session: events.AgentSession{SessionID: uuid.New(), Status: "succeeded"},
+				Output:  agent.BriefingOutput{MarketSummary: "m", PortfolioContext: "p", RisksAndCaveats: "r", Disclaimer: "d"},
+			}, nil
+		},
+	}
+	r := NewRouter(RouterConfig{
+		Logger:                zap.NewNop(),
+		ReadPortfolio:         &fakeOwnedPortfolioReadStore{fakePortfolioReadStore: fakePortfolioReadStore{found: true}, owned: true},
+		PortfolioCatalog:      &fakePortfolioCatalogStore{ownershipOK: true, ownershipSet: true},
+		PriceStreamPartitions: testPricePartitions,
+		AuthStore:             store,
+		AuthConfig:            AuthConfig{CookieSecure: false, SessionTTL: time.Hour},
+		AgentService:          agentSvc,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/portfolios/"+portfolioID.String()+"/briefings", bytes.NewReader([]byte(`{"scheduled":true}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: sid.String()})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if agentSvc.scheduledRuns != 0 {
+		t.Fatalf("expected CreateBriefingScheduled not to be called, calls=%d", agentSvc.scheduledRuns)
 	}
 }
 

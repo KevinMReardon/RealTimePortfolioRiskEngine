@@ -154,6 +154,86 @@ func (s *Store) GetByIDForPortfolio(ctx context.Context, portfolioID, proposalID
 	return prop, nil
 }
 
+// ListByAgentSession returns proposals for one briefing session (stable idea order).
+func (s *Store) ListByAgentSession(ctx context.Context, portfolioID, sessionID uuid.UUID, filter ListByAgentSessionFilter) ([]Proposal, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("proposals: nil store")
+	}
+	statuses := filter.Statuses
+	if len(statuses) == 0 {
+		statuses = []string{StatusProposed, StatusApproved}
+	}
+	rows, err := s.pool.Query(ctx, selectProposalSQL+`
+		WHERE portfolio_id = $1
+		  AND agent_session_id = $2
+		  AND status = ANY($3::text[])
+		ORDER BY trade_idea_index ASC NULLS LAST, created_at ASC
+	`, portfolioID, sessionID, statuses)
+	if err != nil {
+		return nil, fmt.Errorf("proposals: list by session: %w", err)
+	}
+	defer rows.Close()
+	var out []Proposal
+	for rows.Next() {
+		p, err := scanProposal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// RecordPaperAutoRetryFailure increments paper_auto_retry_count; at maxAttempts sets auto_abandoned.
+func (s *Store) RecordPaperAutoRetryFailure(ctx context.Context, portfolioID, proposalID uuid.UUID, maxAttempts int, lastError string) (Proposal, error) {
+	if s == nil || s.pool == nil {
+		return Proposal{}, fmt.Errorf("proposals: nil store")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	lastError = strings.TrimSpace(lastError)
+	var lastErrArg interface{}
+	if lastError != "" {
+		lastErrArg = lastError
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE proposed_trades
+		SET
+			paper_auto_retry_count = paper_auto_retry_count + 1,
+			status = CASE
+				WHEN paper_auto_retry_count + 1 >= $3 THEN '`+StatusAutoAbandoned+`'
+				ELSE status
+			END,
+			last_error = COALESCE($4, last_error),
+			updated_at = NOW(),
+			row_version = row_version + 1
+		WHERE proposal_id = $1
+		  AND portfolio_id = $2
+		  AND status IN ('proposed', 'approved')
+		RETURNING proposal_id
+	`, proposalID, portfolioID, maxAttempts, lastErrArg)
+	var id uuid.UUID
+	if err := row.Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Proposal{}, ErrProposalNotFound
+		}
+		return Proposal{}, fmt.Errorf("proposals: record paper auto retry failure: %w", err)
+	}
+	prop, err := s.GetByIDForPortfolio(ctx, portfolioID, id)
+	if err != nil {
+		return Proposal{}, err
+	}
+	if s.log != nil && prop.Status == StatusAutoAbandoned {
+		s.log.Info("proposal_auto_abandoned",
+			zap.String("proposal_id", prop.ProposalID.String()),
+			zap.String("portfolio_id", portfolioID.String()),
+			zap.Int("paper_auto_retry_count", prop.PaperAutoRetryCount),
+		)
+	}
+	return prop, nil
+}
+
 const selectProposalSQL = `
 		SELECT
 			proposal_id, portfolio_id,
@@ -165,7 +245,8 @@ const selectProposalSQL = `
 			created_at, updated_at,
 			approved_by_user_id::text, approved_at, denied_by_user_id::text, deny_reason,
 			submitted_at, broker_order_id, last_error,
-			critic_verdict, critic_completed_at, critic_model, approval_source
+			critic_verdict, critic_completed_at, critic_model, approval_source,
+			paper_auto_retry_count
 		FROM proposed_trades
 `
 
@@ -610,6 +691,27 @@ func (s *Store) UpsertEquityAnchor(ctx context.Context, portfolioID uuid.UUID, a
 	return nil
 }
 
+// InsertEquityAnchorIfMissing writes equity only when no row exists for portfolio on anchorDate.
+// inserted is true when a new row was created. Existing rows are left unchanged.
+func (s *Store) InsertEquityAnchorIfMissing(ctx context.Context, portfolioID uuid.UUID, anchorDate time.Time, equity decimal.Decimal) (inserted bool, err error) {
+	if s == nil || s.pool == nil {
+		return false, fmt.Errorf("proposals: nil store")
+	}
+	if !equity.IsPositive() {
+		return false, fmt.Errorf("proposals: equity must be positive")
+	}
+	d := time.Date(anchorDate.Year(), anchorDate.Month(), anchorDate.Day(), 0, 0, 0, 0, time.UTC)
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO portfolio_equity_anchor (portfolio_id, anchor_date, equity, captured_at)
+		VALUES ($1, $2::date, $3, NOW())
+		ON CONFLICT (portfolio_id, anchor_date) DO NOTHING
+	`, portfolioID, d, equity.String())
+	if err != nil {
+		return false, fmt.Errorf("proposals: insert equity anchor if missing: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // AppendKillSwitchEvent records an append-only kill-switch toggle.
 func (s *Store) AppendKillSwitchEvent(ctx context.Context, active bool, reason string, toggledByUserID *uuid.UUID) error {
 	if s == nil || s.pool == nil {
@@ -686,6 +788,7 @@ func scanProposal(sc rowScanner) (Proposal, error) {
 		&approvedBy, &approvedAt, &deniedBy, &denyReason,
 		&submittedAt, &brokerID, &lastErr,
 		&criticRaw, &criticAt, &criticModel, &approvalSrc,
+		&p.PaperAutoRetryCount,
 	)
 	if err != nil {
 		return Proposal{}, err

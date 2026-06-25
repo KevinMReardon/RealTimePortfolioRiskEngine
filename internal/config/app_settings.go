@@ -19,6 +19,7 @@ const (
 	SettingAgentExecMode                 = "agent_exec_mode"
 	SettingAgentBriefingCron             = "agent_briefing_cron"
 	SettingAgentBriefingTZ               = "agent_briefing_tz"
+	SettingAgentBriefingCooldownMinutes  = "agent_briefing_cooldown_minutes"
 	SettingAgentModel                    = "agent_model"
 	SettingAgentMaxTurns                 = "agent_max_turns"
 	SettingAgentMaxToolCalls             = "agent_max_tool_calls"
@@ -85,6 +86,16 @@ func OverlayAppSettings(base Config, stored map[string]json.RawMessage) (Config,
 		if out.AgentBriefingTZ, err = parseString(raw); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", SettingAgentBriefingTZ, err)
 		}
+	}
+	if raw, ok := stored[SettingAgentBriefingCooldownMinutes]; ok {
+		mins, err := parseInt(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", SettingAgentBriefingCooldownMinutes, err)
+		}
+		if mins < 0 {
+			mins = 0
+		}
+		out.AgentBriefingCooldown = time.Duration(mins) * time.Minute
 	}
 	if raw, ok := stored[SettingAgentModel]; ok {
 		if out.AgentModel, err = parseString(raw); err != nil {
@@ -333,6 +344,7 @@ func CatalogValues(cfg Config) map[string]any {
 		SettingAgentExecMode:                 cfg.AgentExecMode,
 		SettingAgentBriefingCron:             cfg.AgentBriefingCron,
 		SettingAgentBriefingTZ:               cfg.AgentBriefingTZ,
+		SettingAgentBriefingCooldownMinutes:  int(cfg.AgentBriefingCooldown / time.Minute),
 		SettingAgentModel:                    cfg.AgentModel,
 		SettingAgentMaxTurns:                 cfg.AgentMaxTurns,
 		SettingAgentMaxToolCalls:             cfg.AgentMaxToolCalls,

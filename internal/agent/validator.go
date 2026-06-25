@@ -188,19 +188,19 @@ func sanitizeExecutionLanguage(out BriefingOutput) BriefingOutput {
 func rewriteExecutionPhrases(s string) string {
 	v := s
 	replacements := map[string]string{
-		"i executed":             "this is a proposal",
-		"executed your trade":    "proposed a trade",
-		"placed your order":      "proposed an order",
-		"i placed":               "this is a proposal for",
+		"i executed":               "this is a proposal",
+		"executed your trade":      "proposed a trade",
+		"placed your order":        "proposed an order",
+		"i placed":                 "this is a proposal for",
 		"order has been submitted": "order has not been submitted",
-		"we bought":              "this proposal suggests buying",
-		"we sold":                "this proposal suggests selling",
-		"i bought":               "this proposal suggests buying",
-		"i sold":                 "this proposal suggests selling",
-		"position opened":        "position could be opened",
-		"position closed":        "position could be closed",
-		"trade completed":        "trade is proposed",
-		"fill confirmed":         "fill not confirmed",
+		"we bought":                "this proposal suggests buying",
+		"we sold":                  "this proposal suggests selling",
+		"i bought":                 "this proposal suggests buying",
+		"i sold":                   "this proposal suggests selling",
+		"position opened":          "position could be opened",
+		"position closed":          "position could be closed",
+		"trade completed":          "trade is proposed",
+		"fill confirmed":           "fill not confirmed",
 	}
 	for _, phrase := range bannedExecutionPhrases {
 		replacement := replacements[phrase]
@@ -351,14 +351,40 @@ func normalizeTradeIdeas(v any) []map[string]any {
 			"stop":       coalesceString(anyToString(m["stop"]), "unknown"),
 			"target":     coalesceString(anyToString(m["target"]), "unknown"),
 		}
-		for _, key := range []string{"side", "quantity", "notional_usd", "order_type", "limit_price", "time_in_force"} {
+		normalizedSide := normalizeIdeaSide(anyToString(m["side"]))
+		if normalizedSide != "" {
+			ti["side"] = normalizedSide
+		}
+		for _, key := range []string{"quantity", "notional_usd", "order_type", "limit_price", "time_in_force"} {
 			if s := strings.TrimSpace(anyToString(m[key])); s != "" {
 				ti[key] = s
 			}
 		}
+		// If the model emitted a non-actionable side token (e.g. HOLD/WAIT), treat the idea as narrative-only
+		// by removing structured order fields to avoid failing the full briefing.
+		rawSide := strings.TrimSpace(anyToString(m["side"]))
+		if rawSide != "" && normalizedSide == "" {
+			delete(ti, "quantity")
+			delete(ti, "notional_usd")
+			delete(ti, "order_type")
+			delete(ti, "limit_price")
+			delete(ti, "time_in_force")
+		}
 		out = append(out, ti)
 	}
 	return out
+}
+
+func normalizeIdeaSide(side string) string {
+	s := strings.ToUpper(strings.TrimSpace(side))
+	switch s {
+	case "BUY", "B", "LONG", "BUY_TO_OPEN", "ADD":
+		return "BUY"
+	case "SELL", "S", "SHORT", "SELL_TO_OPEN", "TRIM", "EXIT", "CLOSE":
+		return "SELL"
+	default:
+		return ""
+	}
 }
 
 // tradeIdeaHasStructuredOrderIntent is true when the model signalled executable intent beyond

@@ -10,8 +10,9 @@
 
 - `AGENT_BRIEFING_ENABLED=false`
 - `AGENT_BRIEFING_SCHEDULER_ENABLED=false`
-- `AGENT_BRIEFING_CRON="0 13 * * 1-5"`
+- `AGENT_BRIEFING_CRON="0 9-16 * * 1-5"`
 - `AGENT_BRIEFING_TZ="America/New_York"`
+- `AGENT_BRIEFING_COOLDOWN_MINUTES=30`
 - `ANTHROPIC_API_KEY` (required when briefing enabled)
 - `ANTHROPIC_BASE_URL` (optional)
 - `AGENT_MODEL="claude-sonnet-4.6"`
@@ -29,7 +30,7 @@
     - `model` (string, optional)
     - `temperature` (number, optional)
     - `max_tokens` (number, optional)
-    - `scheduled` (bool, optional)
+    - `scheduled` (bool, optional; accepted for compatibility, but API requests are recorded as manual/on-demand sessions)
     - `run_date` (`YYYY-MM-DD`, optional)
   - Response:
     - `session_id`
@@ -38,20 +39,30 @@
 - `GET /v1/portfolios/:id/briefings/latest`
 - `GET /v1/portfolios/:id/briefings?limit=50&offset=0`
 - `GET /v1/agent-sessions/:session_id/replay`
+- `GET /v1/agent-scheduler/status`
 
 ## Scheduler behavior
 
 - Cron spec uses `AGENT_BRIEFING_CRON` and timezone `AGENT_BRIEFING_TZ`.
+- Scheduler status tracks last tick, next tick, last outcome, last error, last successful scheduled briefing, cooldown-until, and watchdog restarts.
 - On each tick:
   - list eligible portfolios (`owner_user_id IS NOT NULL`)
   - run `CreateBriefingScheduled` for each
-  - idempotency suppresses duplicates per portfolio/day (`scheduled` trigger)
+  - suppress overlap with an active scheduled session
+  - skip while `AGENT_BRIEFING_COOLDOWN_MINUTES` is active after the latest successful scheduled briefing
+- Only the cron runner writes `trigger_source=scheduled`; API-created briefings remain manual/on-demand even when clients send `scheduled=true`.
 - Scheduler shutdown is graceful and tied to server cancellation/waitgroup flow.
+- A watchdog restarts the scheduler if heartbeat/next-tick state becomes stale while scheduling is enabled.
 
 ## Observability
 
 - Structured logs for lifecycle/tool events include:
   - `session_id`, `portfolio_id`, `trigger_source`, `tool_name`, `latency_ms`, `status`
+- Scheduler logs include:
+  - `agent_briefing_scheduler_tick`
+  - `agent_briefing_scheduler_tick_result`
+  - `agent_briefing_scheduler_tick_skipped`
+  - `scheduler_manager_watchdog_restart`
 - Prometheus metrics:
   - `agent_session_outcomes_total{status,trigger_source}`
   - `agent_tool_calls_total{tool_name,status}`
@@ -69,8 +80,12 @@
   - session marked `invalid_output`; validation errors persisted.
 - Scheduler bad cron/tz:
   - scheduler init logs warning and does not start.
-- Duplicate scheduled run:
-  - existing same-day session reused (no duplicate session insert).
+- Duplicate/overlapping scheduled run:
+  - active scheduled sessions are detected with a targeted DB lookup and suppress new scheduled work.
+- Cooldown skip:
+  - scheduled tick logs `last_success_completed_at` and `next_eligible_at`; status exposes cooldown timing.
+- Price-feed trigger overlap:
+  - triggered price-feed polls skip when the regular poll loop is already running.
 
 ## Launch checklist
 
@@ -82,8 +97,10 @@
    - verify redaction in persisted prompts/tool payloads.
 4. Enable scheduler flag and confirm:
    - cron start log appears
-   - one scheduled session per portfolio/day
-   - no duplicate scheduled rows.
+   - `GET /v1/agent-scheduler/status` shows `running=true`
+   - `agent_briefing_scheduler_tick` appears at the configured cadence
+   - cooldown/overlap skips are logged clearly
+   - no duplicate concurrent scheduled rows.
 5. Verify monitoring dashboards/alerts for agent metrics.
 
 ## Rollback plan

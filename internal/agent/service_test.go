@@ -14,17 +14,21 @@ import (
 )
 
 type mockAgentStore struct {
-	createCalls  int
-	created      events.AgentSession
-	toolCalls    []events.AgentSessionToolCall
-	completedOK  *events.AgentSession
-	completedErr *events.AgentSession
+	createCalls           int
+	created               events.AgentSession
+	toolCalls             []events.AgentSessionToolCall
+	completedOK           *events.AgentSession
+	completedErr          *events.AgentSession
 	failOnCanceledContext bool
-	latest       events.AgentSession
-	latestFound  bool
-	list         []events.AgentSession
-	replay       events.AgentSessionReplay
-	replayFound  bool
+	latest                events.AgentSession
+	latestFound           bool
+	latestSucceededSched  events.AgentSession
+	latestSucceededFound  bool
+	activeScheduled       events.AgentSession
+	activeScheduledFound  bool
+	list                  []events.AgentSession
+	replay                events.AgentSessionReplay
+	replayFound           bool
 }
 
 func (m *mockAgentStore) CreateAgentSession(_ context.Context, session events.AgentSession) (events.AgentSession, error) {
@@ -58,6 +62,20 @@ func (m *mockAgentStore) completeFailure(ctx context.Context, session events.Age
 }
 func (m *mockAgentStore) GetLatestAgentSessionForPortfolio(context.Context, uuid.UUID) (events.AgentSession, bool, error) {
 	return m.latest, m.latestFound, nil
+}
+func (m *mockAgentStore) GetLatestSucceededScheduledSessionForPortfolio(context.Context, uuid.UUID) (events.AgentSession, bool, error) {
+	return m.latestSucceededSched, m.latestSucceededFound, nil
+}
+func (m *mockAgentStore) GetActiveScheduledSessionForPortfolio(context.Context, uuid.UUID, time.Duration) (events.AgentSession, bool, error) {
+	if m.activeScheduledFound {
+		return m.activeScheduled, true, nil
+	}
+	for _, item := range m.list {
+		if item.TriggerSource == "scheduled" && (item.Status == "queued" || item.Status == "running") {
+			return item, true, nil
+		}
+	}
+	return events.AgentSession{}, false, nil
 }
 func (m *mockAgentStore) ListAgentSessionsForPortfolio(context.Context, uuid.UUID, events.AgentSessionListFilter) ([]events.AgentSession, error) {
 	return m.list, nil
@@ -238,6 +256,53 @@ func TestRunBriefing_ValidationFailureMarksInvalidOutput(t *testing.T) {
 	}
 	if store.completedErr.Status != "invalid_output" {
 		t.Fatalf("failure status: got %s want invalid_output", store.completedErr.Status)
+	}
+}
+
+func TestRunBriefing_RepairsInvalidOutputBeforeFailing(t *testing.T) {
+	t.Parallel()
+	store := &mockAgentStore{}
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{"market_summary":"I executed your trade."}`,
+				Raw:        []byte(`{"stop_reason":"end_turn"}`),
+			},
+			{
+				StopReason: "end_turn",
+				OutputText: `{
+				  "market_summary":"m",
+				  "portfolio_context":"p",
+				  "trade_ideas":[{"rationale":"r","confidence":0.6,"size":"s","stop":"st","target":"t"}],
+				  "risks_and_caveats":"rc",
+				  "data_gaps":[],
+				  "disclaimer":"d",
+				  "used_sources":[],
+				  "used_fields":[]
+				}`,
+				Raw: []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	toolExec := &mockToolExecutor{}
+	svc := NewService(store, client, toolExec, "anthropic", "claude-test")
+	out, err := svc.RunBriefing(context.Background(), RunBriefingRequest{
+		PortfolioID:   uuid.New(),
+		TriggerSource: "manual",
+		UserInput:     json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("RunBriefing: %v", err)
+	}
+	if out.Output.MarketSummary == "" {
+		t.Fatalf("expected repaired output, got %+v", out.Output)
+	}
+	if store.completedOK == nil {
+		t.Fatal("expected success completion persisted after repair")
+	}
+	if store.completedErr != nil {
+		t.Fatalf("unexpected failure completion: %+v", store.completedErr)
 	}
 }
 
@@ -444,6 +509,126 @@ func TestCreateBriefingScheduled_SkipsWhenSessionRunning(t *testing.T) {
 	}
 	if out.Session.SessionID != existingID {
 		t.Fatalf("expected existing running session returned, got id=%s", out.Session.SessionID)
+	}
+}
+
+func TestCreateBriefingScheduled_SkipsWhenCooldownActiveAfterSuccess(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		latestSucceededSched: events.AgentSession{
+			SessionID:         uuid.New(),
+			PortfolioID:       pid,
+			TriggerSource:     "scheduled",
+			Status:            "succeeded",
+			ResponseValidated: json.RawMessage(`{"market_summary":"ok","portfolio_context":"ok","trade_ideas":[],"risks_and_caveats":"ok","data_gaps":[],"disclaimer":"ok","used_sources":[],"used_fields":[]}`),
+			CreatedAt:         now.Add(-5 * time.Minute),
+			CompletedAt:       timePtr(now.Add(-5 * time.Minute)),
+		},
+		latestSucceededFound: true,
+	}
+	svc := NewService(store, &mockAnthropicClient{}, &mockToolExecutor{}, "anthropic", "claude-test")
+	svc.SetScheduledCooldown(30 * time.Minute)
+	out, err := svc.CreateBriefingScheduled(context.Background(), RunBriefingRequest{
+		PortfolioID: pid,
+		RunDate:     now,
+		UserInput:   json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateBriefingScheduled: %v", err)
+	}
+	if store.createCalls != 0 {
+		t.Fatalf("expected cooldown skip to avoid create, createCalls=%d", store.createCalls)
+	}
+	if out.Session.SessionID != store.latestSucceededSched.SessionID {
+		t.Fatalf("expected latest successful scheduled session returned")
+	}
+}
+
+func TestCreateBriefingScheduled_DoesNotSkipWhenLatestScheduledFailed(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		latestSucceededFound: false,
+	}
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{
+				  "market_summary":"m",
+				  "portfolio_context":"p",
+				  "trade_ideas":[{"rationale":"r","confidence":0.5,"size":"s","stop":"st","target":"t"}],
+				  "risks_and_caveats":"rc",
+				  "data_gaps":[],
+				  "disclaimer":"d",
+				  "used_sources":[],
+				  "used_fields":[]
+				}`,
+				Raw: []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	svc := NewService(store, client, &mockToolExecutor{}, "anthropic", "claude-test")
+	svc.SetScheduledCooldown(30 * time.Minute)
+	if _, err := svc.CreateBriefingScheduled(context.Background(), RunBriefingRequest{
+		PortfolioID: pid,
+		RunDate:     now,
+		UserInput:   json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatalf("CreateBriefingScheduled: %v", err)
+	}
+	if store.createCalls != 1 {
+		t.Fatalf("expected scheduled run to proceed after non-success, createCalls=%d", store.createCalls)
+	}
+}
+
+func TestCreateBriefingScheduled_CooldownDisabledAllowsEachTick(t *testing.T) {
+	t.Parallel()
+	pid := uuid.New()
+	now := time.Now().UTC()
+	store := &mockAgentStore{
+		latestSucceededSched: events.AgentSession{
+			SessionID:     uuid.New(),
+			PortfolioID:   pid,
+			TriggerSource: "scheduled",
+			Status:        "succeeded",
+			CreatedAt:     now,
+			CompletedAt:   timePtr(now),
+		},
+		latestSucceededFound: true,
+	}
+	client := &mockAnthropicClient{
+		responses: []AnthropicMessageResponse{
+			{
+				StopReason: "end_turn",
+				OutputText: `{
+				  "market_summary":"m",
+				  "portfolio_context":"p",
+				  "trade_ideas":[{"rationale":"r","confidence":0.5,"size":"s","stop":"st","target":"t"}],
+				  "risks_and_caveats":"rc",
+				  "data_gaps":[],
+				  "disclaimer":"d",
+				  "used_sources":[],
+				  "used_fields":[]
+				}`,
+				Raw: []byte(`{"stop_reason":"end_turn"}`),
+			},
+		},
+	}
+	svc := NewService(store, client, &mockToolExecutor{}, "anthropic", "claude-test")
+	svc.SetScheduledCooldown(0)
+	if _, err := svc.CreateBriefingScheduled(context.Background(), RunBriefingRequest{
+		PortfolioID: pid,
+		RunDate:     now,
+		UserInput:   json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatalf("CreateBriefingScheduled: %v", err)
+	}
+	if store.createCalls != 1 {
+		t.Fatalf("expected scheduled run with cooldown disabled, createCalls=%d", store.createCalls)
 	}
 }
 

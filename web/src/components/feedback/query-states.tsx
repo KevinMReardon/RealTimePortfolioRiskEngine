@@ -14,6 +14,8 @@ export function LoadingCardGrid() {
 
 export function ErrorAlert({ error, title }: { error: unknown; title?: string }) {
   const api = error instanceof ApiError ? error : null;
+  const details =
+    api?.body?.details && typeof api.body.details === "object" ? api.body.details : null;
   return (
     <Alert variant="destructive">
       <AlertTitle>
@@ -21,6 +23,18 @@ export function ErrorAlert({ error, title }: { error: unknown; title?: string })
       </AlertTitle>
       <AlertDescription className="space-y-2">
         <div>{error instanceof Error ? error.message : "Unknown error"}</div>
+        {details ? (
+          <div className="rounded bg-destructive/10 p-2 text-xs">
+            {Object.entries(details).map(([k, v]) => (
+              <div key={k}>
+                <span className="font-semibold">{k}:</span>{" "}
+                <span className="font-mono break-all">
+                  {typeof v === "string" ? v : JSON.stringify(v)}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {api?.body?.request_id ? (
           <div className="text-xs opacity-90">
             Request ID:{" "}

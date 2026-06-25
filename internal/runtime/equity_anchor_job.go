@@ -29,6 +29,12 @@ type EquityAnchorWriter interface {
 	UpsertEquityAnchor(ctx context.Context, portfolioID uuid.UUID, anchorDate time.Time, equity decimal.Decimal) error
 }
 
+var equityAnchorBootRetryDelays = []time.Duration{
+	30 * time.Second,
+	2 * time.Minute,
+	5 * time.Minute,
+}
+
 // EquityAnchorRESTFactory builds an alpaca.REST client from key material. Matches alpaca.NewREST shape.
 type EquityAnchorRESTFactory func(cfg alpaca.RESTConfig) (alpaca.REST, error)
 
@@ -66,12 +72,7 @@ func (j *EquityAnchorJob) Tick(ctx context.Context) {
 		log.Warn("equity_anchor_job_not_configured")
 		return
 	}
-	loc, err := time.LoadLocation(j.tz())
-	if err != nil {
-		loc = time.FixedZone("America/New_York", -5*3600)
-	}
-	nowNY := time.Now().In(loc)
-	anchorDate := time.Date(nowNY.Year(), nowNY.Month(), nowNY.Day(), 0, 0, 0, 0, time.UTC)
+	anchorDate := TodayAnchorDateUTC(time.Now())
 
 	targets, err := j.Targets.ListAlpacaSyncTargets(ctx)
 	if err != nil {
@@ -89,18 +90,10 @@ func (j *EquityAnchorJob) Tick(ctx context.Context) {
 		if strings.TrimSpace(t.AlpacaKeyID) == "" || strings.TrimSpace(t.AlpacaSecretKey) == "" {
 			continue
 		}
-		baseURL := strings.TrimSpace(t.AlpacaBaseURL)
-		if baseURL == "" {
-			if strings.EqualFold(t.AlpacaAccountMode, "live") {
-				baseURL = alpaca.DefaultRESTBaseURLLive
-			} else {
-				baseURL = alpaca.DefaultRESTBaseURLPaper
-			}
-		}
 		rest, err := j.NewREST(alpaca.RESTConfig{
 			KeyID:     t.AlpacaKeyID,
 			SecretKey: t.AlpacaSecretKey,
-			BaseURL:   baseURL,
+			BaseURL:   alpacaRESTBaseURL(t.AlpacaAccountMode, t.AlpacaBaseURL),
 		})
 		if err != nil {
 			log.Warn("equity_anchor_rest_init_failed",
@@ -183,12 +176,34 @@ func (s *EquityAnchorScheduler) Start(parent context.Context) error {
 		bootCtx, cancel := context.WithTimeout(parent, 5*time.Minute)
 		defer cancel()
 		s.Job.Tick(bootCtx)
+		s.scheduleBootEnsureRetries(parent)
 	}()
 	go func() {
 		<-parent.Done()
 		s.Stop()
 	}()
 	return nil
+}
+
+func (s *EquityAnchorScheduler) scheduleBootEnsureRetries(parent context.Context) {
+	if s == nil || s.Job == nil {
+		return
+	}
+	for _, delay := range equityAnchorBootRetryDelays {
+		delay := delay
+		go func() {
+			timer := time.NewTimer(delay)
+			select {
+			case <-parent.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			s.Job.EnsureTodayAllMissing(runCtx)
+		}()
+	}
 }
 
 // Stop halts the cron scheduler. Safe to call multiple times.

@@ -276,7 +276,7 @@ func TestEvaluate_max_position_pct_and_no_short(t *testing.T) {
 	}
 }
 
-func TestEvaluate_market_hours_weekend(t *testing.T) {
+func TestEvaluate_no_market_hours_gate_at_materialize(t *testing.T) {
 	c := baseCfg()
 	i := policy.Intent{
 		Symbol:      "AAPL",
@@ -292,8 +292,11 @@ func TestEvaluate_market_hours_weekend(t *testing.T) {
 		EquityAnchor:        decimal.RequireFromString("100000"),
 	}
 	d := policy.Evaluate(i, s, c)
-	if !containsCode(d.Violations, policy.RuleMarketHours) {
-		t.Fatalf("want MARKET_HOURS: %v", policy.CompactViolationSummary(d.Violations))
+	if containsCode(d.Violations, policy.RuleMarketHours) {
+		t.Fatalf("materialize evaluate should not gate on MARKET_HOURS: %v", policy.CompactViolationSummary(d.Violations))
+	}
+	if d.StrictOutcome != policy.OutcomeAllow {
+		t.Fatalf("want ALLOW outside regular session when other rules pass: %v", policy.CompactViolationSummary(d.Violations))
 	}
 }
 
@@ -482,12 +485,12 @@ func TestEvaluateForBrokerSubmit_allows_outside_US_regular_session(t *testing.T)
 		EquityAnchor:        decimal.RequireFromString("100000"),
 	}
 	full := policy.Evaluate(i, s, c)
-	if !containsCode(full.Violations, policy.RuleMarketHours) {
-		t.Fatalf("full evaluate should record MARKET_HOURS on weekend: %v", policy.CompactViolationSummary(full.Violations))
+	if full.StrictOutcome != policy.OutcomeAllow {
+		t.Fatalf("evaluate outside regular session should allow: %v", policy.CompactViolationSummary(full.Violations))
 	}
 	br := policy.EvaluateForBrokerSubmit(i, s, c)
 	if br.StrictOutcome != policy.OutcomeAllow || len(br.Violations) != 0 {
-		t.Fatalf("broker submit should not hard-block on session clock alone: %v", policy.CompactViolationSummary(br.Violations))
+		t.Fatalf("broker submit should allow: %v", policy.CompactViolationSummary(br.Violations))
 	}
 }
 

@@ -50,6 +50,7 @@ type PriceIngestor struct {
 	symbolsMu sync.RWMutex
 	symbols   []string
 
+	tickMu  sync.Mutex
 	seqMu   sync.Mutex
 	lastSeq map[string]int64
 	dedupMu sync.Mutex
@@ -93,7 +94,7 @@ func New(svc ingestion.Service, cfg Config) (*PriceIngestor, error) {
 
 // Start runs a long-lived polling loop until ctx is cancelled.
 func (r *PriceIngestor) Start(ctx context.Context) error {
-	if err := r.runTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.runTickExclusive(ctx, "startup"); err != nil && !errors.Is(err, context.Canceled) {
 		// Keep loop alive even if a single tick fails.
 	}
 	ticker := time.NewTicker(r.cfg.Interval)
@@ -103,14 +104,44 @@ func (r *PriceIngestor) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := r.runTick(ctx); err != nil && errors.Is(err, context.Canceled) {
+			if err := r.runTickExclusive(ctx, "poll"); err != nil && errors.Is(err, context.Canceled) {
 				return err
 			}
 		}
 	}
 }
 
+func (r *PriceIngestor) runTickExclusive(ctx context.Context, source string) error {
+	if r == nil {
+		return nil
+	}
+	r.tickMu.Lock()
+	defer r.tickMu.Unlock()
+	return r.runTickWithSource(ctx, source)
+}
+
+func (r *PriceIngestor) tryRunTick(ctx context.Context, source string) error {
+	if r == nil {
+		return nil
+	}
+	if !r.tickMu.TryLock() {
+		if r.log != nil {
+			r.log.Info("price_feed_tick_skipped",
+				zap.String("reason", "previous_tick_still_running"),
+				zap.String("trigger_source", source),
+			)
+		}
+		return nil
+	}
+	defer r.tickMu.Unlock()
+	return r.runTickWithSource(ctx, source)
+}
+
 func (r *PriceIngestor) runTick(ctx context.Context) error {
+	return r.runTickWithSource(ctx, "test")
+}
+
+func (r *PriceIngestor) runTickWithSource(ctx context.Context, source string) error {
 	tickStart := time.Now().UTC()
 	if r.cfg.Runtime != nil {
 		r.cfg.Runtime.OnTickStart(tickStart)
@@ -202,6 +233,7 @@ func (r *PriceIngestor) runTick(ctx context.Context) error {
 		}
 		r.log.Info("price_feed_tick_result",
 			zap.String("provider", providerName),
+			zap.String("trigger_source", source),
 			zap.Int("fetched_quotes", len(res.Quotes)),
 			zap.Int("inserted_quotes", insertedCount),
 			zap.Int("duplicate_quotes", duplicateCount),
@@ -245,7 +277,7 @@ func (r *PriceIngestor) TriggerTick(ctx context.Context) {
 			tickCtx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 		}
-		if err := r.runTick(tickCtx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := r.tryRunTick(tickCtx, "trigger"); err != nil && !errors.Is(err, context.Canceled) {
 			if r.log != nil {
 				r.log.Warn("price_feed_trigger_tick_failed", zap.Error(err))
 			}

@@ -20,14 +20,14 @@ type SettingsStore interface {
 
 // settingDef is a catalog entry describing a single configurable setting.
 type settingDef struct {
-	Key            string `json:"key"`
-	Label          string `json:"label"`
-	Description    string `json:"description"`
-	Group          string `json:"group"`
-	Type           string `json:"type"` // "bool", "int", "string", "select"
-	Default        any    `json:"default"`
-	Options        []string `json:"options,omitempty"` // for "select" type
-	RequiresRestart bool   `json:"requires_restart"`
+	Key             string   `json:"key"`
+	Label           string   `json:"label"`
+	Description     string   `json:"description"`
+	Group           string   `json:"group"`
+	Type            string   `json:"type"` // "bool", "int", "string", "select"
+	Default         any      `json:"default"`
+	Options         []string `json:"options,omitempty"` // for "select" type
+	RequiresRestart bool     `json:"requires_restart"`
 }
 
 // settingCatalog is the authoritative list of tunable settings exposed in the UI.
@@ -78,6 +78,15 @@ var settingCatalog = []settingDef{
 		Group:           "Agent",
 		Type:            "string",
 		Default:         "America/New_York",
+		RequiresRestart: false,
+	},
+	{
+		Key:             "agent_briefing_cooldown_minutes",
+		Label:           "Briefing cooldown (minutes)",
+		Description:     "Minimum wait after a successful scheduled briefing before another scheduled briefing can run. 0 disables cooldown.",
+		Group:           "Agent",
+		Type:            "int",
+		Default:         30,
 		RequiresRestart: false,
 	},
 	{

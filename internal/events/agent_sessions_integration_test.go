@@ -223,7 +223,7 @@ func TestAgentSessionReplayOrdersToolCallsBySeqNo(t *testing.T) {
 	}
 }
 
-func TestAgentSessionScheduledUniquePerPortfolioPerDay(t *testing.T) {
+func TestAgentSessionScheduledAllowsMultiplePerPortfolioPerDay(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
 	repo := NewPostgresStore(pool)
@@ -251,7 +251,7 @@ func TestAgentSessionScheduledUniquePerPortfolioPerDay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first CreateAgentSession: %v", err)
 	}
-	_, err = repo.CreateAgentSession(ctx, AgentSession{
+	second, err := repo.CreateAgentSession(ctx, AgentSession{
 		SessionID:     uuid.New(),
 		PortfolioID:   portfolioID,
 		TriggerSource: "scheduled",
@@ -262,7 +262,10 @@ func TestAgentSessionScheduledUniquePerPortfolioPerDay(t *testing.T) {
 		SystemPrompt:  "system",
 		UserPrompt:    json.RawMessage(`{}`),
 	})
-	if err == nil {
-		t.Fatal("expected unique constraint error for same portfolio + scheduled day")
+	if err != nil {
+		t.Fatalf("second CreateAgentSession: %v", err)
+	}
+	if second.PortfolioID != portfolioID {
+		t.Fatalf("second session portfolio_id: got %s want %s", second.PortfolioID, portfolioID)
 	}
 }

@@ -328,7 +328,7 @@ export function BriefingPage() {
             <CardContent className="grid gap-3 text-sm md:grid-cols-2">
               <Meta label="Session" value={latestQ.data?.SessionID ?? "—"} mono />
               <Meta label="Trigger" value={latestQ.data?.TriggerSource ?? "—"} />
-              <Meta label="Run date" value={formatMaybeDate(latestQ.data?.RunDate)} />
+              <Meta label="Run date" value={formatRunDate(latestQ.data?.RunDate)} />
               <Meta label="Completed" value={formatMaybeDate(latestQ.data?.CompletedAt)} />
             </CardContent>
           </Card>
@@ -343,11 +343,13 @@ export function BriefingPage() {
               </CardHeader>
               <CardContent className="space-y-3">
                 {rankIdeas(latestOutput).length ? (
-                  rankIdeas(latestOutput).map((idea, idx) => (
-                    <div key={`${idea.symbol ?? "idea"}-${idx}`} className="rounded-md border p-3">
+                  rankIdeas(latestOutput).map(({ idea, originalIndex }, rankIdx) => (
+                    <div key={`${idea.symbol ?? "idea"}-${originalIndex}`} className="rounded-md border p-3">
                       {(() => {
-                        const proposal = proposalByTradeIdeaIndex.get(idx);
+                        const proposal = proposalByTradeIdeaIndex.get(originalIndex);
                         const status = proposal ? proposalStatusLabel(proposal.status) : null;
+                        const policyReason = proposal ? extractPolicyDenyReason(proposal.policy_result) : null;
+                        const criticReason = proposal ? extractCriticBlockReason(proposal.critic_verdict) : null;
                         const proposalBusy =
                           (approveProposalM.isPending &&
                             approveProposalM.variables?.proposalId === proposal?.proposal_id) ||
@@ -359,7 +361,7 @@ export function BriefingPage() {
                           <>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="font-semibold">
-                          #{idx + 1} {idea.symbol?.trim() || "Idea"}
+                          #{rankIdx + 1} {idea.symbol?.trim() || "Idea"}
                         </div>
                         <div className="flex items-center gap-2">
                           <Badge variant="outline">
@@ -427,6 +429,16 @@ export function BriefingPage() {
                         {!proposal ? (
                           <span className="text-xs text-muted-foreground">
                             Awaiting materialized proposal for this idea.
+                          </span>
+                        ) : null}
+                        {proposal?.status === "proposed" && policyReason ? (
+                          <span className="text-xs text-amber-600">
+                            Auto-submit blocked by policy: {policyReason}
+                          </span>
+                        ) : null}
+                        {proposal?.status === "proposed" && !policyReason && criticReason ? (
+                          <span className="text-xs text-amber-600">
+                            Auto-submit blocked by critic: {criticReason}
                           </span>
                         ) : null}
                       </div>
@@ -513,6 +525,16 @@ function formatMaybeDate(raw: string | undefined | null): string {
   return new Date(t).toLocaleString();
 }
 
+function formatRunDate(raw: string | undefined | null): string {
+  if (!raw) return "—";
+  // run_date is a logical trading date; keep it date-only to avoid timezone day-shift confusion.
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    return `${m[1]}-${m[2]}-${m[3]}`;
+  }
+  return formatMaybeDate(raw);
+}
+
 function readOutputFromSession(raw: unknown): BriefingOutput | null {
   if (!raw || typeof raw !== "object") return null;
   const candidate = raw as Record<string, unknown>;
@@ -527,9 +549,9 @@ function readOutputFromSession(raw: unknown): BriefingOutput | null {
 }
 
 function rankIdeas(output: BriefingOutput) {
-  return [...(output.trade_ideas ?? [])].sort(
-    (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0),
-  );
+  return [...(output.trade_ideas ?? [])]
+    .map((idea, originalIndex) => ({ idea, originalIndex }))
+    .sort((a, b) => (b.idea.confidence ?? 0) - (a.idea.confidence ?? 0));
 }
 
 function buildCreateBriefingOptions(settings: BriefingSettingsState) {
@@ -595,4 +617,48 @@ function proposalStatusLabel(status: string): string {
   if (s === "rejected") return "Rejected";
   if (s === "submitted") return "Submitted";
   return status;
+}
+
+function extractPolicyDenyReason(policyResult: unknown): string | null {
+  if (!policyResult || typeof policyResult !== "object") return null;
+  const rec = policyResult as {
+    effective_outcome?: unknown;
+    EffectiveOutcome?: unknown;
+    violations?: unknown;
+    Violations?: unknown;
+  };
+  const effectiveOutcome = String(rec.effective_outcome ?? rec.EffectiveOutcome ?? "").toUpperCase();
+  if (effectiveOutcome !== "DENY") return null;
+  const violations = Array.isArray(rec.violations)
+    ? rec.violations
+    : Array.isArray(rec.Violations)
+      ? rec.Violations
+      : [];
+  if (violations.length === 0) return "denied";
+  const first = violations[0] as {
+    code?: unknown;
+    Code?: unknown;
+    message?: unknown;
+    detail?: unknown;
+    Detail?: unknown;
+  };
+  const code = String(first.code ?? first.Code ?? "").trim();
+  const msg = String(first.message ?? first.detail ?? first.Detail ?? "").trim();
+  if (code && msg) return `${code} (${msg})`;
+  if (code) return code;
+  if (msg) return msg;
+  return "denied";
+}
+
+function extractCriticBlockReason(criticVerdict: unknown): string | null {
+  if (!criticVerdict || typeof criticVerdict !== "object") return null;
+  const rec = criticVerdict as { allow?: unknown; reason_code?: unknown; notes?: unknown };
+  const allow = Boolean(rec.allow);
+  if (allow) return null;
+  const reasonCode = String(rec.reason_code ?? "").trim();
+  const notes = String(rec.notes ?? "").trim();
+  if (reasonCode && notes) return `${reasonCode} (${notes})`;
+  if (reasonCode) return reasonCode;
+  if (notes) return notes;
+  return "veto";
 }
